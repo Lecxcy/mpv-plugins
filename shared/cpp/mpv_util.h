@@ -3,8 +3,9 @@
 #include <mpv/client.h>
 
 #include <cstdint>
-#include <cstdio>
 #include <string>
+
+#include <fmt/core.h>
 
 // 供 C++ mpv 插件共用的最小 mpv client API 包装。仅覆盖当前多个插件都需要的
 // 属性读写和 OSD 提示；插件专属的逻辑（如 NODE 结构解析）留在各插件自己的
@@ -43,9 +44,8 @@ inline void set_double(mpv_handle *handle, const char *name, double value) {
 }
 
 inline void show_osd_message(mpv_handle *handle, const std::string &text, double duration_seconds) {
-    char duration_ms[32];
-    std::snprintf(duration_ms, sizeof(duration_ms), "%d", static_cast<int>(duration_seconds * 1000.0));
-    const char *args[] = {"show-text", text.c_str(), duration_ms, nullptr};
+    std::string duration_ms = fmt::format("{}", static_cast<int>(duration_seconds * 1000.0));
+    const char *args[] = {"show-text", text.c_str(), duration_ms.c_str(), nullptr};
     mpv_command(handle, args);
 }
 
@@ -53,9 +53,10 @@ inline void show_osd_message(mpv_handle *handle, const std::string &text, double
 
 // 排查问题时加的调试输出用这个宏包裹，不要事后删除：Release 构建（顶层
 // CMakeLists.txt 的默认构建类型）下 NDEBUG 生效，整段调用在编译期被去掉；
-// 用 -DCMAKE_BUILD_TYPE=Debug 重新配置后才会输出到 stderr。
+// 用 -DCMAKE_BUILD_TYPE=Debug 重新配置后才会输出到 stderr。格式串用 fmt 的
+// `{}` 占位符（编译期做类型检查），不是 printf 的 `%` 占位符。
 #ifndef NDEBUG
-#define MPV_UTIL_DEBUG(...) std::fprintf(stderr, "[mpv-plugins] " __VA_ARGS__)
+#define MPV_UTIL_DEBUG(...) ::fmt::print(stderr, "[mpv-plugins] " __VA_ARGS__)
 #else
 #define MPV_UTIL_DEBUG(...) ((void)0)
 #endif

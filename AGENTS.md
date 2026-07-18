@@ -14,6 +14,13 @@
   同样适用，避免照抄参考代码产生幻觉。
 - 引入第三方代码前必须确认许可证允许使用、修改和再分发，并保留许可证要求的
   版权与许可声明。
+- `external/` 只用来存放需要人工/AI 通读源码作参考的上游项目：mpv 本体，以及
+  被派生/参考的第三方 mpv 插件。判断标准是"写插件时是不是经常要翻它的源码来
+  确认某个 API 怎么用、某个行为是怎么实现的"。像 Catch2、fmt 这类只是拿来
+  当构建依赖链接、按公开文档就能正确使用、不需要通读源码的成熟库，不要整份
+  vendor 进 `external/`，改用 CMake `FetchContent`（在顶层 `CMakeLists.txt`
+  里固定 tag）拉取，配置阶段下载，不占用仓库体积，也不会被当成"可供参考的
+  上游代码"混进 agent 默认阅读的范围。
 - 每个派生插件都应在自己的 README 中用中文记录上游地址、基准提交、许可证、
   开发路线、主要本地改动和上游同步历史。
 - 纯 Lua 插件不加入 CMake；每个 C++ 插件必须在顶层 `CMakeLists.txt` 中显式
@@ -32,6 +39,9 @@
   需要看调试信息时用 `-DCMAKE_BUILD_TYPE=Debug` 重新配置。
 - 每完成一项修改后，AI 助手应先询问用户是否需要 commit，不擅自执行
   `git commit`。
+- 编写某个插件（新建或较大改动）时，应先从 `main` 创建并切换到独立分支
+  （如 `plugin/<插件名>`）再开始工作，不直接在 `main` 上改动；完成开发、
+  测试通过后再合并回 `main`。
 
 这些约定只适用于本项目维护的内容，不要求修改 `external/mpv` 或第三方插件
 仓库中的上游文档和注释。
@@ -144,24 +154,26 @@ set_target_properties(<插件名> PROPERTIES PREFIX "")
 
 ### 单元测试
 
-测试框架统一用 [Catch2](https://github.com/catchorg/Catch2)，以固定版本的
-submodule 引入到 `external/catch2`（首个需要跑测试的 C++ 插件落地时再实际添加，
-现在还不存在这个 submodule）：
+测试框架统一用 [Catch2](https://github.com/catchorg/Catch2)。按上面「`external/`
+只放需要通读参考的上游源码」这条约定，Catch2 不进 `external/`，而是在顶层
+`CMakeLists.txt` 里用 `FetchContent` 固定 tag 拉取一次，各插件的
+`tests/CMakeLists.txt` 直接复用顶层已经拉好的 `Catch2::Catch2WithMain`：
 
-```sh
-git submodule add https://github.com/catchorg/Catch2.git external/catch2
-git -C external/catch2 checkout <固定的 tag，例如 v3.x.x>
+```cmake
+# 顶层 CMakeLists.txt（只需要写一次）
+include(FetchContent)
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.15.2
+)
+FetchContent_MakeAvailable(Catch2)
+list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 ```
-
-和 `external/mpv` 不同，`external/catch2` 是要参与编译链接的构建依赖，不是纯
-参考代码，但同样要保持上游原样、不做本地修改。
 
 `plugins/<插件名>/tests/CMakeLists.txt` 示例：
 
 ```cmake
-add_subdirectory(${CMAKE_SOURCE_DIR}/external/catch2
-                  ${CMAKE_BINARY_DIR}/external/catch2 EXCLUDE_FROM_ALL)
-
 add_executable(<插件名>-tests
     test_<插件名>.cpp
 )

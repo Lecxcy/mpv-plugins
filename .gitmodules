@@ -10,6 +10,3 @@
 [submodule "external/plugins/mpv-image-viewer"]
 	path = external/plugins/mpv-image-viewer
 	url = https://github.com/occivink/mpv-image-viewer.git
-[submodule "external/catch2"]
-	path = external/catch2
-	url = https://github.com/catchorg/Catch2.git

@@ -12,6 +12,8 @@ target_include_directories(enhanced-drag PRIVATE
     ${CMAKE_SOURCE_DIR}
 )
 
+target_link_libraries(enhanced-drag PRIVATE fmt::fmt-header-only)
+
 # mpv C 插件使用宿主 mpv 进程导出的客户端 API 符号，不能链接 libmpv。
 # 在 macOS 上保留这些未解析符号，等 mpv 加载插件时再解析。
 if(APPLE)

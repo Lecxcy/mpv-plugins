@@ -94,8 +94,8 @@ public:
         MousePos pos = read_mouse_pos(handle);
 
         geometry_ = read_geometry(handle);
-        MPV_UTIL_DEBUG("begin mouse=(%.2f,%.2f) margin=(%.2f,%.2f,%.2f,%.2f)\n", pos.x, pos.y,
-                       geometry_.margin_left, geometry_.margin_right, geometry_.margin_top,
+        MPV_UTIL_DEBUG("begin mouse=({:.2f},{:.2f}) margin=({:.2f},{:.2f},{:.2f},{:.2f})\n", pos.x,
+                       pos.y, geometry_.margin_left, geometry_.margin_right, geometry_.margin_top,
                        geometry_.margin_bottom);
 
         origin_.mouse_x = pos.x;
@@ -111,7 +111,8 @@ public:
         }
         MousePos pos = read_mouse_pos(handle);
         auto pan = enhanced_drag::compute_drag_pan(geometry_, origin_, pos.x, pos.y);
-        MPV_UTIL_DEBUG("update mouse=(%.2f,%.2f) pan=(%.4f,%.4f)\n", pos.x, pos.y, pan.pan_x, pan.pan_y);
+        MPV_UTIL_DEBUG("update mouse=({:.2f},{:.2f}) pan=({:.4f},{:.4f})\n", pos.x, pos.y, pan.pan_x,
+                       pan.pan_y);
         apply_pan(handle, pan);
     }
 

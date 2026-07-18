@@ -16,6 +16,35 @@ endif()
 
 include(CTest)
 
+# Catch2、fmt 是构建依赖，不是需要人工/AI 阅读参考的上游源码，不进
+# external/，改用 FetchContent 在配置期拉取（需要联网；固定版本号，不跟随
+# 最新 tag）。
+include(FetchContent)
+
+FetchContent_Declare(
+    Catch2
+    GIT_REPOSITORY https://github.com/catchorg/Catch2.git
+    GIT_TAG v3.15.2
+)
+FetchContent_MakeAvailable(Catch2)
+list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
+
+FetchContent_Declare(
+    fmt
+    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+    GIT_TAG 12.2.0
+)
+# 用 EXCLUDE_FROM_ALL 手动 populate，只用 fmt::fmt-header-only 这个纯头文件
+# INTERFACE 目标：fmt 自带的预编译 src/format.cc 在较新 Clang（AppleClang
+# 21+）下因 consteval 处理差异编译失败，EXCLUDE_FROM_ALL 让默认构建不去碰
+# 这个用不到的目标，绕开这个上游兼容性问题；纯头文件对我们这种调用量不大
+# 的用法没有明显运行时代价。
+FetchContent_GetProperties(fmt)
+if(NOT fmt_POPULATED)
+    FetchContent_Populate(fmt)
+    add_subdirectory(${fmt_SOURCE_DIR} ${fmt_BINARY_DIR} EXCLUDE_FROM_ALL)
+endif()
+
 # 显式添加 C++ 插件；纯 Lua 插件不参与 CMake 构建。
 add_subdirectory(plugins/enhanced-rotation)
 add_subdirectory(plugins/enhanced-drag)

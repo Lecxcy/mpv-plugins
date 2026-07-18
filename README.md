@@ -5,7 +5,26 @@
 
 ## 已实现的插件
 
-<!-- TODO: 迁移 mpv-scripts 后回填 -->
+目前均为纯 Lua 实现，尚未开始 C++ 重构；来源、许可证与改动详情见各插件目录
+下的 README。
+
+- [drag-zoom-box](plugins/drag-zoom-box/README.md)：仿 PotPlayer 的手势 Zoom
+  逻辑并进行优化，仅放大框选范围。
+- [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)：仿 PotPlayer 的
+  A/B Loop 表现并进行优化，支持设置多段 Loop 区间。
+- [enhanced-drag](plugins/enhanced-drag/README.md)：仿 PotPlayer 的手势 Pane
+  拖拽逻辑。
+- [enhanced-rotation](plugins/enhanced-rotation/README.md)：增强了 mpv 的旋
+  转功能，支持 360 度循环。
+- [enhanced-seek](plugins/enhanced-seek/README.md)：修改了 mpv 的快进/快退
+  显示。
+- [enhanced-volume](plugins/enhanced-volume/README.md)：修改了 mpv 的音量调
+  整逻辑及显示，支持长按连续变化。
+- [tail-frame-extension](plugins/tail-frame-extension/README.md)：缓解了
+  mpv 在 loop 跳转时跳过尾帧的问题。
+
+另有 [config/](config/README.md) 目录保存参考用的个人 `input.conf` /
+`mpv.conf`。
 
 ## 获取仓库
 

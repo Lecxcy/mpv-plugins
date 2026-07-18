@@ -5,23 +5,22 @@
 
 ## 已实现的插件
 
-目前均为纯 Lua 实现，尚未开始 C++ 重构；来源、许可证与改动详情见各插件目录
-下的 README。
+来源、许可证与改动详情见各插件目录下的 README。
 
-- [drag-zoom-box](plugins/drag-zoom-box/README.md)：仿 PotPlayer 的手势 Zoom
-  逻辑并进行优化，仅放大框选范围。
-- [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)：仿 PotPlayer 的
-  A/B Loop 表现并进行优化，支持设置多段 Loop 区间。
-- [enhanced-drag](plugins/enhanced-drag/README.md)：仿 PotPlayer 的手势 Pane
-  拖拽逻辑。
-- [enhanced-rotation](plugins/enhanced-rotation/README.md)：增强了 mpv 的旋
-  转功能，支持 360 度循环。
-- [enhanced-seek](plugins/enhanced-seek/README.md)：修改了 mpv 的快进/快退
-  显示。
-- [enhanced-volume](plugins/enhanced-volume/README.md)：修改了 mpv 的音量调
-  整逻辑及显示，支持长按连续变化。
-- [tail-frame-extension](plugins/tail-frame-extension/README.md)：缓解了
-  mpv 在 loop 跳转时跳过尾帧的问题。
+- [drag-zoom-box](plugins/drag-zoom-box/README.md)（Lua）：仿 PotPlayer 的
+  手势 Zoom 逻辑并进行优化，仅放大框选范围。
+- [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)（Lua）：仿 PotPlayer
+  的 A/B Loop 表现并进行优化，支持设置多段 Loop 区间。
+- [enhanced-drag](plugins/enhanced-drag/README.md)（C++）：仿 PotPlayer 的
+  手势 Pane 拖拽逻辑。
+- [enhanced-rotation](plugins/enhanced-rotation/README.md)（C++）：增强了
+  mpv 的旋转功能，支持 360 度循环。
+- [enhanced-seek](plugins/enhanced-seek/README.md)（Lua）：修改了 mpv 的快进/
+  快退显示。
+- [enhanced-volume](plugins/enhanced-volume/README.md)（Lua）：修改了 mpv 的
+  音量调整逻辑及显示，支持长按连续变化。
+- [tail-frame-extension](plugins/tail-frame-extension/README.md)（Lua）：缓
+  解了 mpv 在 loop 跳转时跳过尾帧的问题。
 
 另有 [config/](config/README.md) 目录保存参考用的个人 `input.conf` /
 `mpv.conf`。
@@ -61,6 +60,21 @@ cmake --build build --target <插件名>
 build/plugins/<插件名>/<插件名>.so
 ```
 
+## 运行单元测试
+
+C++ 插件使用 Catch2（`external/catch2`，固定版本 submodule）。构建完成后：
+
+```sh
+ctest --test-dir build --output-on-failure
+```
+
+也可以直接运行某个插件的测试可执行文件（支持 Catch2 原生的 `--list-tests`、
+按标签 `"[enhanced-drag]"` 过滤等用法）：
+
+```sh
+build/plugins/<插件名>/tests/<插件名>-tests
+```
+
 ## 本地测试
 
 直接让 mpv 加载构建出的 C++ 插件：
@@ -74,6 +88,29 @@ mpv --script=build/plugins/<插件名>/<插件名>.so <媒体文件>
 ```sh
 mpv --script=plugins/<本地插件名>/lua/<脚本名>.lua <媒体文件>
 ```
+
+## 收集为可直接使用的 mpv 配置目录
+
+编译完成后，可以用 `scripts/collect-dist.sh` 把 `config/` 和已完成 C++ 重写
+的插件构建物（`.so`）收集到 `dist/`（默认路径，可传参数覆盖）。**尚未 C++
+重写的纯 Lua 插件不在收集范围内**，仍按上面"本地测试"里的方式单独加载：
+
+```sh
+scripts/collect-dist.sh            # 默认 build/ -> dist/
+scripts/collect-dist.sh build dist # 等价的显式写法
+```
+
+`dist/` 会是一份 mpv 配置目录（`input.conf`、`mpv.conf`、已重写插件的
+`.so`），可以直接指向它测试：
+
+```sh
+mpv --config-dir="$(pwd)/dist" <媒体文件>
+```
+
+或者把 `dist/` 下的内容复制进 `~/.config/mpv/`（注意会覆盖同名文件）。生成的
+`mpv.conf` 里插件路径统一用 mpv 的 `~~home/` 元路径写成
+`scripts-append=~~home/...`，指向"当前生效的配置目录"，所以整个 `dist/`
+目录可以随意移动或复制，不依赖生成时的绝对路径。
 
 ## 开发约定
 

@@ -1,4 +1,5 @@
 /build/
+/dist/
 /.cache/
 /cmake-build-*/
 .DS_Store

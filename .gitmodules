@@ -4,3 +4,12 @@
 [submodule "external/plugins/uosc"]
 	path = external/plugins/uosc
 	url = https://github.com/tomasklaen/uosc.git
+[submodule "external/plugins/mpv-tools"]
+	path = external/plugins/mpv-tools
+	url = https://github.com/VideoPlayerCode/mpv-tools.git
+[submodule "external/plugins/mpv-image-viewer"]
+	path = external/plugins/mpv-image-viewer
+	url = https://github.com/occivink/mpv-image-viewer.git
+[submodule "external/catch2"]
+	path = external/catch2
+	url = https://github.com/catchorg/Catch2.git

@@ -22,6 +22,16 @@
   `ctest` 跑通的 Catch2 单元测试，详见"新建 C++ 插件"一节。
 - 不提前抽象公共代码。至少有两个插件确实需要同一实现时，才将代码提取到
   `shared/`。
+- 代码注释只保留代码本身读不出来的信息：设计取舍的原因、与上游行为的差异、
+  mpv API 的隐藏坑/怪癖、历史决策的背景。单纯复述代码在做什么（变量名、
+  实现已经写明的内容）不需要注释。
+- 排查问题时加的调试输出（`fprintf(stderr, ...)` 之类）不必在问题解决后删
+  掉，改用 `shared/cpp/mpv_util.h` 里的 `MPV_UTIL_DEBUG` 宏（或直接
+  `#ifndef NDEBUG`）包裹。顶层 `CMakeLists.txt` 未显式指定
+  `CMAKE_BUILD_TYPE` 时默认为 `Release`，此时这些输出在编译期被整段去掉；
+  需要看调试信息时用 `-DCMAKE_BUILD_TYPE=Debug` 重新配置。
+- 每完成一项修改后，AI 助手应先询问用户是否需要 commit，不擅自执行
+  `git commit`。
 
 这些约定只适用于本项目维护的内容，不要求修改 `external/mpv` 或第三方插件
 仓库中的上游文档和注释。

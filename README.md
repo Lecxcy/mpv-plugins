@@ -7,8 +7,9 @@
 
 来源、许可证与改动详情见各插件目录下的 README。
 
-- [drag-zoom-box](plugins/drag-zoom-box/README.md)（Lua）：仿 PotPlayer 的
-  手势 Zoom 逻辑并进行优化，仅放大框选范围。
+- [drag-zoom-box](plugins/drag-zoom-box/README.md)（C++）：仿 PotPlayer 的
+  手势 Zoom 逻辑并进行优化，仅放大框选范围，只认左上到右下、右下到左上
+  两个对角线方向。
 - [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)（Lua）：仿 PotPlayer
   的 A/B Loop 表现并进行优化，支持设置多段 Loop 区间。
 - [enhanced-drag](plugins/enhanced-drag/README.md)（C++）：仿 PotPlayer 的

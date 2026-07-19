@@ -101,6 +101,7 @@ std::optional<Point> read_mouse_pos(mpv_handle *handle) {
 std::optional<Geometry> read_geometry(mpv_handle *handle) {
     auto window = read_window_size(handle);
     if (!window) {
+        MPV_UTIL_DEBUG("read_geometry: osd-dimensions w/h unavailable\n");
         return std::nullopt;
     }
 
@@ -114,6 +115,7 @@ std::optional<Geometry> read_geometry(mpv_handle *handle) {
 
     double dw = 0.0, dh = 0.0;
     bool have_display_size = false;
+    const char *display_size_source = "none";
     auto read_display_size = [&](const char *name) {
         with_node_map(handle, name, [&](const mpv_node_list &list) {
             double w = node_map_get_number(list, "dw", 0.0);
@@ -122,6 +124,7 @@ std::optional<Geometry> read_geometry(mpv_handle *handle) {
                 dw = w;
                 dh = h;
                 have_display_size = true;
+                display_size_source = name;
             }
         });
     };
@@ -129,11 +132,28 @@ std::optional<Geometry> read_geometry(mpv_handle *handle) {
     if (!have_display_size) {
         read_display_size("video-out-params");
     }
+
+    MPV_UTIL_DEBUG("read_geometry: osd=({:.1f},{:.1f}) margins=(l{:.1f},r{:.1f},t{:.1f},b{:.1f}) "
+                   "dw/dh=({:.1f},{:.1f}) from={} zoom={:.4f} pan=({:.4f},{:.4f})\n",
+                   window->w, window->h, margin_left, margin_right, margin_top, margin_bottom, dw, dh,
+                   display_size_source, mpv_util::get_double(handle, "video-zoom", 0.0),
+                   mpv_util::get_double(handle, "video-pan-x", 0.0), mpv_util::get_double(handle, "video-pan-y", 0.0));
+
     if (!have_display_size) {
+        MPV_UTIL_DEBUG("read_geometry: dw/dh unavailable from either video-target-params or video-out-params\n");
         return std::nullopt;
     }
 
-    return compute_geometry(window->w, window->h, margin_left, margin_right, margin_top, margin_bottom, dw, dh);
+    auto geometry = compute_geometry(window->w, window->h, margin_left, margin_right, margin_top, margin_bottom, dw, dh);
+    if (!geometry) {
+        MPV_UTIL_DEBUG("read_geometry: compute_geometry rejected the inputs above (degenerate rect)\n");
+        return std::nullopt;
+    }
+
+    MPV_UTIL_DEBUG("read_geometry: rect=({:.1f},{:.1f}) scaled=({:.1f},{:.1f}) base=({:.1f},{:.1f})\n",
+                   geometry->rect_x, geometry->rect_y, geometry->scaled_w, geometry->scaled_h, geometry->base_w,
+                   geometry->base_h);
+    return geometry;
 }
 
 void set_overlay(mpv_handle *handle, const std::string &format, const std::string &data, int res_x, int res_y,
@@ -178,6 +198,9 @@ void reset_zoom(mpv_handle *handle) {
 }
 
 void apply_zoom_in(mpv_handle *handle, const Box &box) {
+    MPV_UTIL_DEBUG("apply_zoom_in: box=({:.1f},{:.1f})-({:.1f},{:.1f}) size=({:.1f},{:.1f})\n", box.x1, box.y1,
+                   box.x2, box.y2, box.x2 - box.x1, box.y2 - box.y1);
+
     auto geometry = read_geometry(handle);
     if (!geometry) {
         mpv_util::show_osd_message(handle, "Video geometry unavailable", kGeometryErrorOsdDurationSeconds);
@@ -186,8 +209,14 @@ void apply_zoom_in(mpv_handle *handle, const Box &box) {
 
     auto result = compute_zoom(*geometry, box);
     if (!result) {
+        MPV_UTIL_DEBUG("apply_zoom_in: compute_zoom rejected the box (collapsed or outside visible rect)\n");
         return;
     }
+
+    MPV_UTIL_DEBUG("apply_zoom_in: u/v=({:.4f},{:.4f})-({:.4f},{:.4f}) scale_x={:.4f} scale_y={:.4f} "
+                   "-> zoom={:.4f} pan=({:.4f},{:.4f})\n",
+                   result->u1, result->v1, result->u2, result->v2, result->scale_x, result->scale_y, result->zoom,
+                   result->pan_x, result->pan_y);
 
     mpv_util::set_double(handle, "video-zoom", result->zoom);
     mpv_util::set_double(handle, "video-pan-x", result->pan_x);
@@ -201,8 +230,10 @@ public:
     void begin(mpv_handle *handle) {
         auto pos = read_mouse_pos(handle);
         if (!pos) {
+            MPV_UTIL_DEBUG("begin: mouse-pos unavailable, drag not started\n");
             return;
         }
+        MPV_UTIL_DEBUG("begin: mouse=({:.1f},{:.1f})\n", pos->x, pos->y);
         dragging_ = true;
         start_ = *pos;
         current_ = *pos;
@@ -230,7 +261,11 @@ public:
         clear_overlay(handle);
 
         Box box = normalize_box(start_, current_);
-        DragDirection direction = classify_direction(current_.x - start_.x, current_.y - start_.y, kMinDragPixels);
+        double dx = current_.x - start_.x;
+        double dy = current_.y - start_.y;
+        DragDirection direction = classify_direction(dx, dy, kMinDragPixels);
+        MPV_UTIL_DEBUG("finish: start=({:.1f},{:.1f}) current=({:.1f},{:.1f}) dx={:.1f} dy={:.1f} direction={}\n",
+                       start_.x, start_.y, current_.x, current_.y, dx, dy, static_cast<int>(direction));
         switch (direction) {
         case DragDirection::kZoomIn:
             apply_zoom_in(handle, box);

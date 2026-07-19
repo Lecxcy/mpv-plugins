@@ -87,6 +87,12 @@ std::optional<ZoomResult> compute_zoom(const Geometry &geometry, const Box &box)
     result.zoom = log2_value(scale);
     result.pan_x = 0.5 - (u1 + u2) / 2.0;
     result.pan_y = 0.5 - (v1 + v2) / 2.0;
+    result.u1 = u1;
+    result.v1 = v1;
+    result.u2 = u2;
+    result.v2 = v2;
+    result.scale_x = scale_x;
+    result.scale_y = scale_y;
     return result;
 }
 

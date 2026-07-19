@@ -64,6 +64,11 @@ struct ZoomResult {
     double zoom = 0.0;
     double pan_x = 0.0;
     double pan_y = 0.0;
+    // 排查偏移问题用的中间量（框选换算到视频内部的归一化坐标、两个轴各自
+    // 要求的缩放倍率），核心结果只看上面三个字段，这些不参与判断，只给
+    // src/plugin.cpp 的调试日志用。
+    double u1 = 0.0, v1 = 0.0, u2 = 0.0, v2 = 0.0;
+    double scale_x = 0.0, scale_y = 0.0;
 };
 
 // box 是屏幕像素坐标系下的框选矩形；返回 nullopt 表示框选范围换算到视频

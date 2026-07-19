@@ -606,7 +606,16 @@ void apply_loaded_segments(PluginState &state, std::vector<Segment> segments) {
     sort_segments(segments);
     state.segments = std::move(segments);
     state.pending.clear();
-    refresh_loop(state);
+
+    // 跟 on_unset_a/on_unset_b/on_toggle_segment/on_toggle_enabled 一样的
+    // 道理（§2.7）：存档加载进来的区间跟光标当前位置大概率对不上（比如
+    // 加载前根本没有循环、或者存档里的区间在别的时间段），不能指望"接着
+    // 往下播、碰巧落回某个区间"，必须显式吸入最近的下一个区间起点，立刻
+    // 开始循环，而不是先什么都不做地继续正常播放。
+    auto order = build_active_order(state.segments, state.pending);
+    if (!try_reengage_seek(state, order, time_pos(state.handle))) {
+        refresh_loop(state);
+    }
 }
 
 // ---- SPEC §6：疑似改名确认期间的独占按键区段 ----

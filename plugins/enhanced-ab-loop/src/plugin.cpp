@@ -199,6 +199,32 @@ void apply_tail_extension(PluginState &state) {
 
 // ---- SPEC §2.1：核心跳转机制 ----
 
+// 光标是否落在空隙里（不在任何激活区间内部）——不管是手动 seek 落进去
+// 的，还是重新打开循环开关时光标本来就停在那——loop_enabled 为 true 时
+// 都不能指望“接着往下播、碰巧自然落回循环范围”这种运气：mpv 的
+// update_ab_loop_clip()（playloop.c:665）只要发现 pos 已经超过目标终点
+// 就会直接禁用 clip，继续播放只会一路播到文件真正结束（配合
+// loop-file=inf 就表现成“从头重播”，不是回到我们定义的循环里）；就算没
+// 超过终点，光落在空隙里也是"该进的段还没进"，不如显式 seek 过去让循环
+// 立刻生效。返回 true 表示已经发出了这次 seek（调用方不需要再做别的，等
+// 落地事件回来经 on_native_landing 确认即可）；返回 false 表示光标本来就
+// 在某个激活区间内部，不需要动。
+bool try_reengage_seek(PluginState &state, const std::vector<ActiveEntry> &order, double pos) {
+    if (!state.loop_enabled) {
+        return false;
+    }
+    auto target = loop_reengage_target(order, pos);
+    if (!target) {
+        return false;
+    }
+    // 这次 seek 是我们自己发的，标记一下避免落地时被 on_native_landing 的
+    // 完成判定误伤。
+    state.pending_self_seek = true;
+    std::string target_str = fmt::format("{:.6f}", *target);
+    run_command(state.handle, {"seek", target_str.c_str(), "absolute", "exact"});
+    return true;
+}
+
 // 无条件按“当前光标落在 active_order 的哪一项”重新预置 ab-loop-a/b 为
 // 那一项自己的 a/b（恒 a<b，见 logic.cpp compute_jump_pair 的注释）。所有
 // 编辑类操作（set-a/set-b/nudge/extend/unset/toggle-segment/
@@ -309,6 +335,16 @@ void on_native_landing(PluginState &state, mpv_event_id event_id) {
                 return;
             }
         }
+    }
+
+    // 不是"这一段刚播完"，那就检查这次落地是不是把光标扔进了空隙里（比如
+    // 用户手动拖进度条，不是走 set-a/set-b 之类的编辑操作）——是的话立刻
+    // 吸入正确的位置，不要指望"接着往下播、碰巧自然落回循环范围"，见
+    // try_reengage_seek 的注释。2026-07-19 debug 会话实测确认过：不加这一
+    // 步的话，手动把进度拖到两段之间的空隙，会一路正常播过去，直到碰到
+    // 下一段自己的终点才被原生机制拽回来，而不是立刻跳进下一段。
+    if (try_reengage_seek(state, order, pos)) {
+        return;
     }
 
     refresh_loop(state);
@@ -455,25 +491,8 @@ void on_toggle_segment(PluginState &state) {
 void on_toggle_enabled(PluginState &state) {
     state.loop_enabled = !state.loop_enabled;
 
-    if (state.loop_enabled) {
-        auto order = build_active_order(state.segments, state.pending);
-        auto target = loop_reengage_target(order, time_pos(state.handle));
-        if (target) {
-            // 光标当前没有落在任何激活区间内部——可能是关闭循环期间播到了
-            // 空隙里，也可能已经越过了全部区间——不能指望“接着往下播、碰
-            // 巧自然落回循环范围”，mpv 的 update_ab_loop_clip()
-            // （playloop.c:665）只要发现 pos 已经超过目标终点就会直接禁用
-            // clip，继续播放只会一路播到文件真正结束（配合 loop-file=inf
-            // 就表现成“从头重播”，不是回到我们定义的循环里）。显式 seek
-            // 过去，让循环立刻生效。这次 seek 是我们自己发的，标记一下避免
-            // 落地时被 on_native_landing 的完成判定误伤。
-            state.pending_self_seek = true;
-            std::string target_str = fmt::format("{:.6f}", *target);
-            run_command(state.handle, {"seek", target_str.c_str(), "absolute", "exact"});
-        } else {
-            refresh_loop(state);
-        }
-    } else {
+    auto order = build_active_order(state.segments, state.pending);
+    if (!try_reengage_seek(state, order, time_pos(state.handle))) {
         refresh_loop(state);
     }
 

@@ -45,7 +45,15 @@ if(NOT fmt_POPULATED)
     add_subdirectory(${fmt_SOURCE_DIR} ${fmt_BINARY_DIR} EXCLUDE_FROM_ALL)
 endif()
 
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.12.0
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # 显式添加 C++ 插件；纯 Lua 插件不参与 CMake 构建。
 add_subdirectory(plugins/enhanced-rotation)
 add_subdirectory(plugins/enhanced-drag)
 add_subdirectory(plugins/drag-zoom-box)
+add_subdirectory(plugins/enhanced-ab-loop)

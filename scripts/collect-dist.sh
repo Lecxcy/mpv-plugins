@@ -29,7 +29,7 @@ dist_dir="${2:-dist}"
 [[ "${dist_dir}" != /* ]] && dist_dir="${repo_root}/${dist_dir}"
 
 # 已完成 C++ 重写的插件；名字与 CMake target 名 / .so 文件名一致。
-cpp_plugins=(enhanced-rotation enhanced-drag)
+cpp_plugins=(enhanced-rotation enhanced-drag drag-zoom-box enhanced-ab-loop)
 
 missing=()
 for name in "${cpp_plugins[@]}"; do

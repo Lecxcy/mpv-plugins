@@ -18,7 +18,7 @@
   mpv 的旋转功能，支持 360 度循环。
 - [enhanced-seek](plugins/enhanced-seek/README.md)（Lua）：修改了 mpv 的快进/
   快退显示。
-- [enhanced-volume](plugins/enhanced-volume/README.md)（Lua）：修改了 mpv 的
+- [enhanced-volume](plugins/enhanced-volume/README.md)（C++）：修改了 mpv 的
   音量调整逻辑及显示，支持长按连续变化。
 - [tail-frame-extension](plugins/tail-frame-extension/README.md)（Lua）：缓
   解了 mpv 在 loop 跳转时跳过尾帧的问题；与 enhanced-ab-loop 同时使用时

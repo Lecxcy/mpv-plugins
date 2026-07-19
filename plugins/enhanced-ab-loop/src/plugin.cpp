@@ -27,8 +27,17 @@ constexpr double kNudgeStep = 0.05;
 constexpr double kStateOsdDuration = 1.8;
 constexpr double kToggleOsdDuration = 1.8;
 constexpr double kTailFreezeSeconds = 0.3;
+// §6 疑似改名确认提示：mpv 的 show-text 没有"一直显示直到手动清除"这个
+// 选项，只有一个到期时长；用一个大到实际上不会自然到期的时长（24h）模拟
+// "常驻直到用户回答"，比另开一个定时器每隔几百毫秒重发一遍 show-text 简
+// 单——期间所有按键都被下面的 confirm-only 区段吞掉，不会有别的 OSD 把
+// 它顶掉，也就不需要真的做到"永久"。
+constexpr double kConfirmOsdDurationSeconds = 24.0 * 3600.0;
 constexpr const char *kVideoFilterLabel = "enhanced-ab-loop-tail-video";
 constexpr const char *kAudioFilterLabel = "enhanced-ab-loop-tail-audio";
+// §6：确认疑似改名期间临时抢占的 input section 名字，独立于插件自身按键
+// 分发用的 client 名字，避免和别的插件/未来功能撞名。
+constexpr const char *kConfirmSectionName = "enhanced_ab_loop_confirm";
 // 内容采样哈希只读头尾各 64KiB，不读全文件（SPEC §6：毫秒级完成）。
 constexpr std::size_t kContentSampleBytes = 65536;
 
@@ -60,6 +69,10 @@ struct PluginState {
     std::optional<std::string> rename_from;
     // §6：等待用户按 Y/N 确认的“唯一候选疑似改名”查找结果。
     std::optional<store::LookupResult> pending_confirmation;
+    // pending_confirmation 非空期间：进入确认前的 pause 状态，回答完（无论
+    // y/n）要还原回这个值，而不是无条件恢复播放——用户确认前本来就是暂停
+    // 的话，不该被顺手取消暂停。
+    bool paused_before_confirm = false;
 };
 
 // ---- mpv 属性/命令的小工具 ----
@@ -399,16 +412,15 @@ void show_state(PluginState &state, const std::string &prefix) {
     std::ostringstream text;
     text << prefix << " | " << format_clock(time_pos(state.handle)) << "/"
          << format_clock(file_duration(state.handle));
+    // §3.4：pending 的两个端点单独放在首行展示（"A:.. B:.."），不再拼成
+    // 一行独立的 "[a,unset]"/"[unset,b]" 混在完整区间列表后面——那样看着
+    // 像是被塞进了同一个列表、只是没排好序，容易被误读成 bug。
+    text << " | A:" << (state.pending.has_a ? format_precise(state.pending.a) : "--")
+         << " B:" << (state.pending.has_b ? format_precise(state.pending.b) : "--");
 
     for (const auto &seg : state.segments) {
         text << "\n" << (seg.enabled ? "" : "(off) ") << "[" << format_precise(seg.a) << ","
              << format_precise(seg.b) << "]";
-    }
-    // SPEC §3.4：pending 独立展示一行，不嫁接到相邻的完整区间上。
-    if (state.pending.has_a) {
-        text << "\n[" << format_precise(state.pending.a) << ",unset]";
-    } else if (state.pending.has_b) {
-        text << "\n[unset," << format_precise(state.pending.b) << "]";
     }
 
     mpv_util::show_osd_message(state.handle, text.str(), kStateOsdDuration);
@@ -597,6 +609,88 @@ void apply_loaded_segments(PluginState &state, std::vector<Segment> segments) {
     refresh_loop(state);
 }
 
+// ---- SPEC §6：疑似改名确认期间的独占按键区段 ----
+//
+// mpv 没有原生弹窗，确认对话框全靠 OSD 文字 + 临时抢占按键实现；光靠
+// "抢占 confirm-yes/confirm-no 两个 binding 名字"并不能阻止用户在看清提示
+// 之前误按别的键做出其他编辑操作。这里额外用 `define-section` +
+// `enable-section ... exclusive` 把当前正常输入完全遮住，只放行
+// confirm-yes/confirm-no 实际绑定的物理按键，其余一律吃掉不做任何事——
+// 这正是 mpv 自己的 Lua `mp.add_forced_key_binding`/console.lua 输入框实现
+// "独占键盘"的同一套机制（`player/lua/defaults.lua` 的
+// `mp.input_define_section`/`mp.input_enable_section` 只是这几个 command
+// 的薄包装），C 插件没有那层封装，直接调 `mpv_command` 效果完全一样。
+//
+// 不硬编码 "y"/"n"：物理按键是用户在自己 input.conf 里配的，插件这边并不
+// 知道具体是哪个键，只知道 binding 名字（`enhanced_ab_loop/confirm-yes`
+// 等）。改用 `input-bindings` 属性反查"当前实际绑定到这个 binding 名字的
+// 物理键"，跟用户自定义按键保持一致，也顺带覆盖了 §6 提到的 CJK 重复键位
+// （比如 set-a 同时绑了 `[` 和 `【`，confirm-yes/no 理论上也可能被这样
+// 重复绑定）。
+std::vector<std::string> keys_bound_to_script_binding(mpv_handle *h, const std::string &binding_name) {
+    std::vector<std::string> keys;
+    std::string needle = "script-binding " + binding_name;
+
+    mpv_node node;
+    if (mpv_get_property(h, "input-bindings", MPV_FORMAT_NODE, &node) < 0) {
+        return keys;
+    }
+    if (node.format == MPV_FORMAT_NODE_ARRAY) {
+        for (int i = 0; i < node.u.list->num; ++i) {
+            const mpv_node &item = node.u.list->values[i];
+            if (item.format != MPV_FORMAT_NODE_MAP) {
+                continue;
+            }
+            const mpv_node_list &map = *item.u.list;
+            const char *key = nullptr;
+            const char *cmd = nullptr;
+            for (int j = 0; j < map.num; ++j) {
+                if (std::strcmp(map.keys[j], "key") == 0 && map.values[j].format == MPV_FORMAT_STRING) {
+                    key = map.values[j].u.string;
+                } else if (std::strcmp(map.keys[j], "cmd") == 0 && map.values[j].format == MPV_FORMAT_STRING) {
+                    cmd = map.values[j].u.string;
+                }
+            }
+            if (key && cmd && needle == cmd) {
+                keys.emplace_back(key);
+            }
+        }
+    }
+    mpv_free_node_contents(&node);
+    return keys;
+}
+
+// 返回 false 表示当前找不到任何绑定到 confirm-yes/confirm-no 的物理按键
+// （用户把这两个 binding 从 input.conf 里删掉了）——这种情况下绝不能真的
+// 启用独占区段，否则会把用户锁死在一个连 y/n 都按不出来的暂停画面里，没
+// 有任何办法退出确认状态。宁可退化成"不锁键"，也不能造成死锁。
+bool engage_confirm_lockout(PluginState &state) {
+    std::vector<std::string> yes_keys = keys_bound_to_script_binding(state.handle, "enhanced_ab_loop/confirm-yes");
+    std::vector<std::string> no_keys = keys_bound_to_script_binding(state.handle, "enhanced_ab_loop/confirm-no");
+    if (yes_keys.empty() || no_keys.empty()) {
+        return false;
+    }
+
+    std::string contents;
+    for (const auto &key : yes_keys) {
+        contents += key + " script-binding enhanced_ab_loop/confirm-yes\n";
+    }
+    for (const auto &key : no_keys) {
+        contents += key + " script-binding enhanced_ab_loop/confirm-no\n";
+    }
+    // "unmapped" 是 input.conf 的特殊键名，匹配区段里没有单独绑定的任何键
+    // （含鼠标/滚轮），`ignore` 是 mpv 自带的"吃掉这个按键，什么都不做"。
+    contents += "unmapped ignore\n";
+
+    run_command(state.handle, {"define-section", kConfirmSectionName, contents.c_str(), "force"});
+    run_command(state.handle, {"enable-section", kConfirmSectionName, "exclusive"});
+    return true;
+}
+
+void release_confirm_lockout(PluginState &state) {
+    run_command(state.handle, {"disable-section", kConfirmSectionName});
+}
+
 void on_save_loops(PluginState &state) {
     if (state.current_path.empty() || state.current_content_hash.empty()) {
         mpv_util::show_osd_message(state.handle, "Save denied: no file", kStateOsdDuration);
@@ -642,17 +736,32 @@ void on_load_loops(PluginState &state) {
         apply_loaded_segments(state, result.segments);
         mpv_util::show_osd_message(state.handle, "Loops loaded", kStateOsdDuration);
         break;
-    case store::LookupResult::Kind::kSingleCandidate:
+    case store::LookupResult::Kind::kSingleCandidate: {
         // mpv 没有原生弹窗，靠 OSD 文字 + 临时抢占 confirm-yes/confirm-no 两
         // 个键来实现确认（SPEC §6）。存档里只有路径的哈希，插件这边压根拿不
         // 到那条旧路径的明文，提示文案不带路径，不是能带但故意藏起来。
+        //
+        // 用户在还没看清/回答这条提示之前，不能让播放继续、也不能让其他按
+        // 键趁机做别的编辑操作（比如手滑碰到 set-a 又插入一段），所以：
+        // 1. 记住确认前的 pause 状态，强制暂停；
+        // 2. 尝试启用独占按键区段（engage_confirm_lockout，找不到 y/n 对应
+        //    的物理键时会返回 false，安全退化成不锁键，避免死锁）；
+        // 3. OSD 用一个 24h 的超长时长模拟"常驻直到用户回答"（show-text 没
+        //    有真正的"永久"选项，见 kConfirmOsdDurationSeconds 的注释）。
         state.pending_confirmation = result;
-        mpv_util::show_osd_message(
-            state.handle,
-            "Found an archive with matching content under a different name.\nconfirm-yes to load & "
-            "migrate, confirm-no to cancel",
-            kStateOsdDuration);
+        state.paused_before_confirm = mpv_util::get_flag(state.handle, "pause", false);
+        mpv_util::set_flag(state.handle, "pause", true);
+        bool locked = engage_confirm_lockout(state);
+
+        std::string message =
+            "Found an archive with matching content under a different name.\n"
+            "Playback paused - confirm-yes to load & migrate, confirm-no to cancel.";
+        if (locked) {
+            message += "\n(other keys are disabled until you answer)";
+        }
+        mpv_util::show_osd_message(state.handle, message, kConfirmOsdDurationSeconds);
         break;
+    }
     case store::LookupResult::Kind::kNoArchive:
         mpv_util::show_osd_message(state.handle, "No archive found", kStateOsdDuration);
         break;
@@ -665,6 +774,12 @@ void on_confirm(PluginState &state, bool yes) {
     }
     store::LookupResult result = *state.pending_confirmation;
     state.pending_confirmation.reset();
+
+    // 不管答的是 y 还是 n，都要解除独占按键区段、把 pause 还原成确认前的
+    // 状态——本来就是暂停的话不该被顺手取消暂停，见 paused_before_confirm
+    // 的注释。
+    release_confirm_lockout(state);
+    mpv_util::set_flag(state.handle, "pause", state.paused_before_confirm);
 
     if (!yes) {
         mpv_util::show_osd_message(state.handle, "Cancelled", kToggleOsdDuration);
@@ -680,6 +795,14 @@ void on_confirm(PluginState &state, bool yes) {
 // ---- 文件生命周期 ----
 
 void on_file_loaded(PluginState &state) {
+    // 理论上确认锁键期间几乎不可能触发新文件加载（独占区段吞掉了正常的
+    // 切换文件按键），但外部 IPC 仍可能在这期间发 loadfile/playlist-next；
+    // 防御性地把独占区段解除掉，避免文件切换之后独占状态还残留着，把新
+    // 文件的正常操作也锁死。
+    if (state.pending_confirmation) {
+        release_confirm_lockout(state);
+    }
+
     state.segments.clear();
     state.pending.clear();
     state.loop_enabled = true;

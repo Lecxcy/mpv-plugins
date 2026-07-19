@@ -20,6 +20,19 @@ inline double get_double(mpv_handle *handle, const char *name, double fallback) 
     return value;
 }
 
+inline bool get_flag(mpv_handle *handle, const char *name, bool fallback) {
+    int value = fallback ? 1 : 0;
+    if (mpv_get_property(handle, name, MPV_FORMAT_FLAG, &value) < 0) {
+        return fallback;
+    }
+    return value != 0;
+}
+
+inline void set_flag(mpv_handle *handle, const char *name, bool value) {
+    int as_int = value ? 1 : 0;
+    mpv_set_property(handle, name, MPV_FORMAT_FLAG, &as_int);
+}
+
 namespace detail {
 
 inline bool fits_int64(double value) {

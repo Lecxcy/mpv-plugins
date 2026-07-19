@@ -435,7 +435,15 @@ void on_set_b(PluginState &state) {
 void on_unset_a(PluginState &state) {
     auto outcome = unset_a(state.segments, state.pending, time_pos(state.handle));
     if (outcome.ok()) {
-        refresh_loop(state);
+        // 撤销掉的区间如果正好是光标当前所在的这一段（§3.4 的唯一触发条件
+        // 就是"光标在某个完整区间内部"），撤销后光标可能落进一个不再被任
+        // 何激活项覆盖的"孤岛"——比如撤完之后这一段彻底消失、旁边又没有
+        // 别的区间挨着。跟手动 seek 落空隙同理，不能指望接着往下播碰巧落
+        // 回循环范围，见 try_reengage_seek 的注释。
+        auto order = build_active_order(state.segments, state.pending);
+        if (!try_reengage_seek(state, order, time_pos(state.handle))) {
+            refresh_loop(state);
+        }
     }
     show_state(state, outcome.message);
 }
@@ -443,7 +451,12 @@ void on_unset_a(PluginState &state) {
 void on_unset_b(PluginState &state) {
     auto outcome = unset_b(state.segments, state.pending, time_pos(state.handle));
     if (outcome.ok()) {
-        refresh_loop(state);
+        // 同 on_unset_a：撤销可能让光标落进一个不再被任何激活项覆盖的
+        // "孤岛"，需要显式吸入，不能指望接着往下播碰巧落回循环范围。
+        auto order = build_active_order(state.segments, state.pending);
+        if (!try_reengage_seek(state, order, time_pos(state.handle))) {
+            refresh_loop(state);
+        }
     }
     show_state(state, outcome.message);
 }
@@ -483,7 +496,13 @@ void on_nudge_b(PluginState &state, double delta) {
 void on_toggle_segment(PluginState &state) {
     auto outcome = toggle_segment(state.segments, time_pos(state.handle));
     if (outcome.ok()) {
-        refresh_loop(state);
+        // 禁用光标所在的这一段会把它从 active_order 里摘掉，光标可能因此
+        // 落进一个不再被任何激活项覆盖的"孤岛"，跟 on_unset_a/on_unset_b
+        // 是同一类问题，同样需要显式吸入。
+        auto order = build_active_order(state.segments, state.pending);
+        if (!try_reengage_seek(state, order, time_pos(state.handle))) {
+            refresh_loop(state);
+        }
     }
     show_state(state, outcome.message);
 }

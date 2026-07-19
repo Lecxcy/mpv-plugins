@@ -262,12 +262,39 @@ void refresh_loop(PluginState &state) {
 // 已经就在正确的位置上，直接落到 refresh_loop 重新武装同一项即可，省掉一
 // 次没必要的 seek 往返（F1 单段循环最在意“跳转瞬间不能有卡顿”，多一次
 // seek 就是多一次风险）。
-void on_native_landing(PluginState &state) {
+// event_id 用来区分 MPV_EVENT_SEEK 和 MPV_EVENT_PLAYBACK_RESTART：我们自己
+// 主动发出去的显式 seek（跨段补跳、重开循环的 reengage），mpv 恒定会发
+// 两条通知——SEEK（排队）和 PLAYBACK_RESTART（真正落地完成）；而原生
+// ab-loop 自己内部触发的自环跳转只发一条 SEEK，没有 PLAYBACK_RESTART（它
+// 不走完整的“重新开始播放”流程，只是 demux 挪了一下）。
+//
+// pending_self_seek 必须等到这两条都收到才能清掉，中途收到的 SEEK 先按兵
+// 不动——原来的写法收到第一条（SEEK）就直接确认落地、清掉
+// pending_self_seek，等第二条（PLAYBACK_RESTART，其实是同一次 seek 的回
+// 声）到达时，pending_self_seek 已经是 false，而光标位置跟“这一段自己的
+// 起点”分毫不差（暂停状态下两条事件之间没有真实播放时间流逝，位置完全
+// 冻结），会被误判成“原生自环真的又完整播完一轮”，从而触发又一次补跳，
+// 循环往复——2026-07-19 debug 会话实测复现过：关闭循环、暂停时设置区间
+// 边界、再打开循环，2 秒内触发了两万多次 seek 的死循环。播放中不会露馅，
+// 是因为两条事件之间总有真实播放时间流逝，光标已经往前挪了一点，恰好躲
+// 过“精确等于起点”这个判定——不是这里没问题，只是暂停时才会稳定复现。
+void on_native_landing(PluginState &state, mpv_event_id event_id) {
+    if (state.pending_self_seek) {
+        if (event_id == MPV_EVENT_PLAYBACK_RESTART) {
+            // 我们自己发出去的 seek 真正落地了，确认武装，清掉标记。
+            state.pending_self_seek = false;
+            refresh_loop(state);
+        }
+        // event_id == MPV_EVENT_SEEK：只是排队通知，还没真正落地，先不动，
+        // 等 PLAYBACK_RESTART。
+        return;
+    }
+
     double pos = time_pos(state.handle);
     auto order = build_active_order(state.segments, state.pending);
 
     bool is_completion = false;
-    if (!state.pending_self_seek && state.loop_enabled && !order.empty() && state.armed_index) {
+    if (state.loop_enabled && !order.empty() && state.armed_index) {
         auto idx = locate_active_index(order, pos);
         is_completion = idx && *idx == *state.armed_index && order[*idx].b.has_value() &&
                         std::abs(pos - order[*idx].a) <= kCursorEpsilon;
@@ -739,7 +766,7 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
             MPV_UTIL_DEBUG("event: {} pos={:.3f}\n",
                             event->event_id == MPV_EVENT_SEEK ? "SEEK" : "PLAYBACK_RESTART",
                             time_pos(state.handle));
-            on_native_landing(state);
+            on_native_landing(state, event->event_id);
             break;
         case MPV_EVENT_PROPERTY_CHANGE: {
             auto *prop = static_cast<mpv_event_property *>(event->data);

@@ -1,6 +1,5 @@
 #include <mpv/client.h>
 
-#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -21,24 +20,18 @@ namespace {
 
 using namespace enhanced_ab_loop;
 
-// 对应 shared/lua/plugin_config.lua 里 enhanced_ab_loop / tail_frame_extension
-// 两段配置，重写后合并进同一个插件，这里就不再拆两份配置文件。
+// 重写后合并了原 tail-frame-extension 插件的配置，不再拆两份。
 constexpr double kNudgeStep = 0.05;
 constexpr double kStateOsdDuration = 1.8;
 constexpr double kToggleOsdDuration = 1.8;
 constexpr double kTailFreezeSeconds = 0.3;
-// §6 疑似改名确认提示：mpv 的 show-text 没有"一直显示直到手动清除"这个
-// 选项，只有一个到期时长；用一个大到实际上不会自然到期的时长（24h）模拟
-// "常驻直到用户回答"，比另开一个定时器每隔几百毫秒重发一遍 show-text 简
-// 单——期间所有按键都被下面的 confirm-only 区段吞掉，不会有别的 OSD 把
-// 它顶掉，也就不需要真的做到"永久"。
+// show-text 没有"一直显示直到手动清除"，只有到期时长；用一个大到不会自然
+// 到期的时长（24h）模拟"常驻直到用户回答"，期间按键都被 confirm-only 区
+// 段吞掉，不会有别的 OSD 把它顶掉，不需要额外的定时器去重发。
 constexpr double kConfirmOsdDurationSeconds = 24.0 * 3600.0;
 constexpr const char *kVideoFilterLabel = "enhanced-ab-loop-tail-video";
 constexpr const char *kAudioFilterLabel = "enhanced-ab-loop-tail-audio";
-// §6：确认疑似改名期间临时抢占的 input section 名字，独立于插件自身按键
-// 分发用的 client 名字，避免和别的插件/未来功能撞名。
 constexpr const char *kConfirmSectionName = "enhanced_ab_loop_confirm";
-// 内容采样哈希只读头尾各 64KiB，不读全文件（SPEC §6：毫秒级完成）。
 constexpr std::size_t kContentSampleBytes = 65536;
 
 struct PluginState {
@@ -48,34 +41,28 @@ struct PluginState {
     Pending pending;
     bool loop_enabled = true;
 
-    // ---- §2.1 跨段跳转的状态机（见 refresh_loop / on_native_landing 的
-    // 注释）：原生 ab-loop 只能在“本段自己的 a/b”之间自环，跳到下一段靠
-    // 我们自己监测到这个自环命中了本段的 a，再显式补一次 seek。----
-    // armed_index：当前把 ab-loop-a/b 设成了 active_order 里哪一项自己的
-    // a/b（编辑类操作——set-a/set-b/nudge/extend/toggle 等——每次都会经
-    // refresh_loop 无条件刷新这个值，不带跨段跳转判断，避免误触发）。
+    // 原生 ab-loop 只能在"本段自己的 a/b"之间自环，跳到下一段靠自己监测到
+    // 这个自环命中了本段的 a，再显式补一次 seek（见 refresh_loop /
+    // on_native_landing）。armed_index 记录当前武装的是 active_order 里
+    // 哪一项；编辑类操作每次都经 refresh_loop 无条件刷新它，不带跳转判断。
     std::optional<std::size_t> armed_index;
-    // pending_self_seek：true 表示上一次的 seek 是我们自己为了跨段跳转发
-    // 出去的，还没等到它落地的 SEEK/PLAYBACK_RESTART 事件确认。这期间不能
-    // 把“落在 armed_index 自己的 a 上”误判成又一次原生自环完成。
+    // true 表示上一次的 seek 是自己为了跨段跳转发出去的，还没等到落地的
+    // SEEK/PLAYBACK_RESTART 事件确认，这期间不能把"落在 armed_index 自己
+    // 的 a 上"误判成又一次原生自环完成。
     bool pending_self_seek = false;
 
-    std::string current_path;      // 真实绝对路径，只留在内存里，不写盘
-    std::string current_path_key;  // current_path 的哈希，写进存档文件的是这个
+    std::string current_path;     // 只留在内存里读文件、算哈希，不写盘
+    std::string current_path_key; // current_path 的哈希，写进存档文件的是这个
     std::string current_content_hash;
 
-    // §6：这次会话是否是靠“唯一候选”借用了别的路径下的存档；非空时下次
-    // 保存要把那条 entry 迁移到当前路径，而不是新增一条，避免孤儿累积。
+    // 这次会话是否是靠"唯一候选"借用了别的路径下的存档；非空时下次保存要
+    // 把那条 entry 迁移到当前路径，而不是新增一条，避免孤儿累积。
     std::optional<std::string> rename_from;
-    // §6：等待用户按 Y/N 确认的“唯一候选疑似改名”查找结果。
     std::optional<store::LookupResult> pending_confirmation;
     // pending_confirmation 非空期间：进入确认前的 pause 状态，回答完（无论
-    // y/n）要还原回这个值，而不是无条件恢复播放——用户确认前本来就是暂停
-    // 的话，不该被顺手取消暂停。
+    // y/n）要还原回这个值，不能无条件恢复播放。
     bool paused_before_confirm = false;
 };
-
-// ---- mpv 属性/命令的小工具 ----
 
 double time_pos(mpv_handle *h) {
     return mpv_util::get_double(h, "time-pos", 0.0);
@@ -149,8 +136,6 @@ bool has_track_of_type(mpv_handle *h, const char *type) {
     return found;
 }
 
-// ---- SPEC §4.2：尾帧冻结滤镜，直接搬 tail-frame-extension.lua 的做法 ----
-
 // mpv 的 vf/af 属性里每个 filter 的 label 字段不带 "@" 前缀；对不存在的
 // label 调 "remove" 会打印 "item label ... not found" 警告，所以先查一遍再决定要
 // 不要 remove。
@@ -210,18 +195,14 @@ void apply_tail_extension(PluginState &state) {
     }
 }
 
-// ---- SPEC §2.1：核心跳转机制 ----
-
-// 光标是否落在空隙里（不在任何激活区间内部）——不管是手动 seek 落进去
-// 的，还是重新打开循环开关时光标本来就停在那——loop_enabled 为 true 时
-// 都不能指望“接着往下播、碰巧自然落回循环范围”这种运气：mpv 的
-// update_ab_loop_clip()（playloop.c:665）只要发现 pos 已经超过目标终点
-// 就会直接禁用 clip，继续播放只会一路播到文件真正结束（配合
-// loop-file=inf 就表现成“从头重播”，不是回到我们定义的循环里）；就算没
-// 超过终点，光落在空隙里也是"该进的段还没进"，不如显式 seek 过去让循环
-// 立刻生效。返回 true 表示已经发出了这次 seek（调用方不需要再做别的，等
-// 落地事件回来经 on_native_landing 确认即可）；返回 false 表示光标本来就
-// 在某个激活区间内部，不需要动。
+// 光标落在空隙里（不在任何激活区间内部）时，loop_enabled 为 true 也不能
+// 指望"接着往下播、碰巧自然落回循环范围"：mpv 的 update_ab_loop_clip()
+// （playloop.c:665）只要发现 pos 已经超过目标终点就会直接禁用 clip，继续
+// 播放只会一路播到文件真正结束（配合 loop-file=inf 就表现成"从头重播"，
+// 不是回到定义的循环里）；就算没超过终点，落在空隙里也是"该进的段还没
+// 进"，不如显式 seek 过去让循环立刻生效。返回 true 表示已经发出了这次
+// seek（落地事件回来经 on_native_landing 确认即可）；返回 false 表示光标
+// 本来就在某个激活区间内部，不需要动。
 bool try_reengage_seek(PluginState &state, const std::vector<ActiveEntry> &order, double pos) {
     if (!state.loop_enabled) {
         return false;
@@ -238,14 +219,10 @@ bool try_reengage_seek(PluginState &state, const std::vector<ActiveEntry> &order
     return true;
 }
 
-// 无条件按“当前光标落在 active_order 的哪一项”重新预置 ab-loop-a/b 为
-// 那一项自己的 a/b（恒 a<b，见 logic.cpp compute_jump_pair 的注释）。所有
-// 编辑类操作（set-a/set-b/nudge/extend/unset/toggle-segment/
-// toggle-enabled/文件加载）都走这条路径，不做任何跨段跳转判断——这只是
-// “刷新当前该看住哪一项”，判断“是不是该跳到下一项了”是
-// on_native_landing 专门的职责，两者不能混在一起，否则编辑操作里凑巧把
-// 光标停在某项自己的 a 上（比如 D1 测的那种边界落点）会被误判成“这一项
-// 播完了，跳下一项”。
+// 无条件按"当前光标落在 active_order 的哪一项"重新预置 ab-loop-a/b，不做
+// 任何跨段跳转判断——判断"是不是该跳到下一项了"是 on_native_landing 专门
+// 的职责，两者不能混在一起，否则编辑操作里凑巧把光标停在某项自己的 a 上
+// （比如 D1 测的那种边界落点）会被误判成"这一项播完了，跳下一项"。
 void refresh_loop(PluginState &state) {
     double pos = time_pos(state.handle);
     auto order = build_active_order(state.segments, state.pending);
@@ -285,38 +262,31 @@ void refresh_loop(PluginState &state) {
     state.armed_index = idx;
 }
 
-// 只从 MPV_EVENT_SEEK / MPV_EVENT_PLAYBACK_RESTART 调用：判断“原生 ab-loop
-// 是不是刚自环命中了 armed_index 自己的 a”，是的话说明这一项已经完整播完
-// 一轮，显式补一次 seek 跳到 active_order 里下一项的起点，再交给
-// refresh_loop 去预置下一项自己的 a/b。三个条件缺一都不能判定为“播完了”：
-//   1. pending_self_seek 必须是 false——如果这次落地本来就是我们自己刚发
-//      出去的跨段 seek 的回执，不能又把它当成一次新的“播完”再跳一次。
+// 只从 MPV_EVENT_SEEK / MPV_EVENT_PLAYBACK_RESTART 调用：判断"原生 ab-loop
+// 是不是刚自环命中了 armed_index 自己的 a"，是的话说明这一项已经完整播完
+// 一轮，显式补一次 seek 跳到 active_order 里下一项的起点。三个条件缺一都
+// 不能判定为"播完了"：
+//   1. pending_self_seek 必须是 false——不能把自己刚发出去的跨段 seek 的
+//      回执，当成一次新的"播完"再跳一次。
 //   2. 落地的 idx 必须等于 armed_index，且 pos 必须精确落在那一项自己的
 //      a 上——原生自环的跳转目标只可能是这个值，落在段内其他位置（比如
-//      D 节测 nudge 时手动 seek 到区间中间）不算数，避免把普通编辑操作
-//      误判成“这段播完了”。
-//   3. 这一项必须有真正的 b（开放到文件末尾的 pending 不适用，交给
-//      §2.2 的 eof-reached 兜底）。
-// next == idx（active_order 只有一项，自己套自己）时不需要真的发 seek——
-// 已经就在正确的位置上，直接落到 refresh_loop 重新武装同一项即可，省掉一
-// 次没必要的 seek 往返（F1 单段循环最在意“跳转瞬间不能有卡顿”，多一次
-// seek 就是多一次风险）。
-// event_id 用来区分 MPV_EVENT_SEEK 和 MPV_EVENT_PLAYBACK_RESTART：我们自己
-// 主动发出去的显式 seek（跨段补跳、重开循环的 reengage），mpv 恒定会发
-// 两条通知——SEEK（排队）和 PLAYBACK_RESTART（真正落地完成）；而原生
-// ab-loop 自己内部触发的自环跳转只发一条 SEEK，没有 PLAYBACK_RESTART（它
-// 不走完整的“重新开始播放”流程，只是 demux 挪了一下）。
+//      D 节测 nudge 时手动 seek 到区间中间）不算数。
+//   3. 这一项必须有真正的 b（开放到文件末尾的 pending 交给 §2.2 的
+//      eof-reached 兜底）。
+// next == idx（active_order 只有一项，自己套自己）时不发 seek，直接落到
+// refresh_loop 重新武装同一项，省掉一次没必要的 seek 往返。
 //
-// pending_self_seek 必须等到这两条都收到才能清掉，中途收到的 SEEK 先按兵
-// 不动——原来的写法收到第一条（SEEK）就直接确认落地、清掉
-// pending_self_seek，等第二条（PLAYBACK_RESTART，其实是同一次 seek 的回
-// 声）到达时，pending_self_seek 已经是 false，而光标位置跟“这一段自己的
-// 起点”分毫不差（暂停状态下两条事件之间没有真实播放时间流逝，位置完全
-// 冻结），会被误判成“原生自环真的又完整播完一轮”，从而触发又一次补跳，
-// 循环往复——2026-07-19 debug 会话实测复现过：关闭循环、暂停时设置区间
-// 边界、再打开循环，2 秒内触发了两万多次 seek 的死循环。播放中不会露馅，
-// 是因为两条事件之间总有真实播放时间流逝，光标已经往前挪了一点，恰好躲
-// 过“精确等于起点”这个判定——不是这里没问题，只是暂停时才会稳定复现。
+// event_id 用来区分 SEEK 和 PLAYBACK_RESTART：自己主动发出去的显式 seek，
+// mpv 恒定会发两条通知——SEEK（排队）和 PLAYBACK_RESTART（真正落地完
+// 成）；原生 ab-loop 自环跳转只发一条 SEEK，没有 PLAYBACK_RESTART（它不
+// 走完整的"重新开始播放"流程，只是 demux 挪了一下）。pending_self_seek 必
+// 须等到两条都收到才能清掉，中途收到的 SEEK 先按兵不动——原来的写法收到
+// 第一条就直接清掉标记，等第二条（同一次 seek 的回声）到达时，标记已经
+// 是 false，而暂停状态下两条事件之间光标位置分毫不差，会被误判成"原生自
+// 环真的又播完一轮"，触发又一次补跳，循环往复：2026-07-19 debug 会话实测
+// 复现过，暂停时设置区间边界、重开循环，2 秒内触发了两万多次 seek 的死循
+// 环。播放中不会露馅，是因为两条事件之间总有真实播放时间流逝，光标已经
+// 往前挪了一点，恰好躲过"精确等于起点"这个判定。
 void on_native_landing(PluginState &state, mpv_event_id event_id) {
     if (state.pending_self_seek) {
         if (event_id == MPV_EVENT_PLAYBACK_RESTART) {
@@ -351,11 +321,8 @@ void on_native_landing(PluginState &state, mpv_event_id event_id) {
     }
 
     // 不是"这一段刚播完"，那就检查这次落地是不是把光标扔进了空隙里（比如
-    // 用户手动拖进度条，不是走 set-a/set-b 之类的编辑操作）——是的话立刻
-    // 吸入正确的位置，不要指望"接着往下播、碰巧自然落回循环范围"，见
-    // try_reengage_seek 的注释。2026-07-19 debug 会话实测确认过：不加这一
-    // 步的话，手动把进度拖到两段之间的空隙，会一路正常播过去，直到碰到
-    // 下一段自己的终点才被原生机制拽回来，而不是立刻跳进下一段。
+    // 用户手动拖进度条，不是走 set-a/set-b 之类的编辑操作），见
+    // try_reengage_seek 的注释。
     if (try_reengage_seek(state, order, pos)) {
         return;
     }
@@ -380,8 +347,6 @@ void on_eof_reached(PluginState &state, bool reached) {
     std::string target_str = fmt::format("{:.6f}", *target);
     run_command(state.handle, {"seek", target_str.c_str(), "absolute", "exact"});
 }
-
-// ---- OSD 展示 ----
 
 std::string format_clock(double seconds) {
     if (seconds < 0) {
@@ -418,15 +383,26 @@ void show_state(PluginState &state, const std::string &prefix) {
     text << " | A:" << (state.pending.has_a ? format_precise(state.pending.a) : "--")
          << " B:" << (state.pending.has_b ? format_precise(state.pending.b) : "--");
 
-    for (const auto &seg : state.segments) {
+    auto append_segment = [&text](const Segment &seg) {
         text << "\n" << (seg.enabled ? "" : "(off) ") << "[" << format_precise(seg.a) << ","
              << format_precise(seg.b) << "]";
+    };
+
+    std::size_t total = state.segments.size();
+    auto plan = plan_segment_display(total);
+    for (std::size_t i = 0; i < plan.head_count; ++i) {
+        append_segment(state.segments[i]);
+    }
+    if (plan.hidden_count > 0) {
+        text << "\n... (" << plan.hidden_count << " more)";
+        for (std::size_t i = total - plan.tail_count; i < total; ++i) {
+            append_segment(state.segments[i]);
+        }
     }
 
+    MPV_UTIL_DEBUG("show_state: {}\n", text.str());
     mpv_util::show_osd_message(state.handle, text.str(), kStateOsdDuration);
 }
-
-// ---- 按键动作：每个动作调用纯逻辑层，成功就 refresh_loop，最后展示状态 ----
 
 void on_set_a(PluginState &state) {
     auto outcome = set_a(state.segments, state.pending, time_pos(state.handle));
@@ -447,11 +423,9 @@ void on_set_b(PluginState &state) {
 void on_unset_a(PluginState &state) {
     auto outcome = unset_a(state.segments, state.pending, time_pos(state.handle));
     if (outcome.ok()) {
-        // 撤销掉的区间如果正好是光标当前所在的这一段（§3.4 的唯一触发条件
-        // 就是"光标在某个完整区间内部"），撤销后光标可能落进一个不再被任
-        // 何激活项覆盖的"孤岛"——比如撤完之后这一段彻底消失、旁边又没有
-        // 别的区间挨着。跟手动 seek 落空隙同理，不能指望接着往下播碰巧落
-        // 回循环范围，见 try_reengage_seek 的注释。
+        // 撤销掉的区间如果正好是光标当前所在的这一段，撤销后可能落进一个
+        // 不再被任何激活项覆盖的"孤岛"（比如这一段彻底消失、旁边又没有
+        // 别的区间挨着），见 try_reengage_seek 的注释。
         auto order = build_active_order(state.segments, state.pending);
         if (!try_reengage_seek(state, order, time_pos(state.handle))) {
             refresh_loop(state);
@@ -463,8 +437,7 @@ void on_unset_a(PluginState &state) {
 void on_unset_b(PluginState &state) {
     auto outcome = unset_b(state.segments, state.pending, time_pos(state.handle));
     if (outcome.ok()) {
-        // 同 on_unset_a：撤销可能让光标落进一个不再被任何激活项覆盖的
-        // "孤岛"，需要显式吸入，不能指望接着往下播碰巧落回循环范围。
+        // 同 on_unset_a。
         auto order = build_active_order(state.segments, state.pending);
         if (!try_reengage_seek(state, order, time_pos(state.handle))) {
             refresh_loop(state);
@@ -508,9 +481,7 @@ void on_nudge_b(PluginState &state, double delta) {
 void on_toggle_segment(PluginState &state) {
     auto outcome = toggle_segment(state.segments, time_pos(state.handle));
     if (outcome.ok()) {
-        // 禁用光标所在的这一段会把它从 active_order 里摘掉，光标可能因此
-        // 落进一个不再被任何激活项覆盖的"孤岛"，跟 on_unset_a/on_unset_b
-        // 是同一类问题，同样需要显式吸入。
+        // 禁用光标所在的这一段会把它从 active_order 里摘掉，同 on_unset_a。
         auto order = build_active_order(state.segments, state.pending);
         if (!try_reengage_seek(state, order, time_pos(state.handle))) {
             refresh_loop(state);
@@ -529,8 +500,6 @@ void on_toggle_enabled(PluginState &state) {
 
     mpv_util::show_osd_message(state.handle, state.loop_enabled ? "loop on" : "loop off", kToggleOsdDuration);
 }
-
-// ---- SPEC §6：存档 ----
 
 struct ContentSample {
     std::uint64_t size = 0;
@@ -553,9 +522,6 @@ std::optional<ContentSample> read_content_sample(const std::string &path) {
     ContentSample sample;
     sample.size = static_cast<std::uint64_t>(size);
 
-    // 头/尾各读多少字节、尾部从哪个偏移开始读，这段算术在 store::
-    // compute_sample_ranges 里，覆盖了“文件比采样窗口还小”的边界，这里只
-    // 负责按算好的范围做实际的文件 IO。
     store::SampleRanges ranges = store::compute_sample_ranges(sample.size, kContentSampleBytes);
 
     sample.head.resize(ranges.head_len);
@@ -589,10 +555,8 @@ bool write_file_text(const std::string &path, const std::string &text) {
 }
 
 std::string archive_path_for_hash(mpv_handle *h, const std::string &hash) {
-    // 用 ~~home/ 而不是 ~~/：后者在“子路径已存在时返回已存在的那个目录”，
-    // 语义上是给读取用的；这里是要写入的目录，明确指向 mpv 配置目录，避免
-    // 依赖“碰巧存在”这种不确定性（--no-config 时两者都会变成空字符串，
-    // 这个降级行为是 mpv 自身文档明确写的，插件不需要额外处理）。
+    // 用 ~~home/ 而不是 ~~/：后者语义是"子路径已存在时返回已存在的那个
+    // 目录"，是给读取用的；这里要写入，需要明确指向 mpv 配置目录。
     std::string dir = expand_path(h, "~~home/loop-segments");
     if (dir.empty()) {
         return "";
@@ -607,35 +571,26 @@ void apply_loaded_segments(PluginState &state, std::vector<Segment> segments) {
     state.segments = std::move(segments);
     state.pending.clear();
 
-    // 跟 on_unset_a/on_unset_b/on_toggle_segment/on_toggle_enabled 一样的
-    // 道理（§2.7）：存档加载进来的区间跟光标当前位置大概率对不上（比如
-    // 加载前根本没有循环、或者存档里的区间在别的时间段），不能指望"接着
-    // 往下播、碰巧落回某个区间"，必须显式吸入最近的下一个区间起点，立刻
-    // 开始循环，而不是先什么都不做地继续正常播放。
+    // 存档加载进来的区间跟光标当前位置大概率对不上，同 on_unset_a。
     auto order = build_active_order(state.segments, state.pending);
     if (!try_reengage_seek(state, order, time_pos(state.handle))) {
         refresh_loop(state);
     }
 }
 
-// ---- SPEC §6：疑似改名确认期间的独占按键区段 ----
+// mpv 没有原生弹窗，光靠"抢占 confirm-yes/confirm-no 两个 binding 名字"并
+// 不能阻止用户在看清提示之前误按别的键做出其他编辑操作。这里用
+// `define-section` + `enable-section ... exclusive` 把正常输入完全遮住，
+// 只放行 confirm-yes/confirm-no 实际绑定的物理按键——这正是 mpv 自己的
+// Lua `mp.add_forced_key_binding`/console.lua 实现"独占键盘"的同一套机制
+// （`player/lua/defaults.lua` 的 `mp.input_define_section`/
+// `mp.input_enable_section` 只是这几个 command 的薄包装），C 插件没有那层
+// 封装，直接调 `mpv_command` 效果完全一样。
 //
-// mpv 没有原生弹窗，确认对话框全靠 OSD 文字 + 临时抢占按键实现；光靠
-// "抢占 confirm-yes/confirm-no 两个 binding 名字"并不能阻止用户在看清提示
-// 之前误按别的键做出其他编辑操作。这里额外用 `define-section` +
-// `enable-section ... exclusive` 把当前正常输入完全遮住，只放行
-// confirm-yes/confirm-no 实际绑定的物理按键，其余一律吃掉不做任何事——
-// 这正是 mpv 自己的 Lua `mp.add_forced_key_binding`/console.lua 输入框实现
-// "独占键盘"的同一套机制（`player/lua/defaults.lua` 的
-// `mp.input_define_section`/`mp.input_enable_section` 只是这几个 command
-// 的薄包装），C 插件没有那层封装，直接调 `mpv_command` 效果完全一样。
-//
-// 不硬编码 "y"/"n"：物理按键是用户在自己 input.conf 里配的，插件这边并不
-// 知道具体是哪个键，只知道 binding 名字（`enhanced_ab_loop/confirm-yes`
-// 等）。改用 `input-bindings` 属性反查"当前实际绑定到这个 binding 名字的
-// 物理键"，跟用户自定义按键保持一致，也顺带覆盖了 §6 提到的 CJK 重复键位
-// （比如 set-a 同时绑了 `[` 和 `【`，confirm-yes/no 理论上也可能被这样
-// 重复绑定）。
+// 不硬编码 "y"/"n"：物理按键是用户在自己 input.conf 里配的，插件这边只知
+// 道 binding 名字。改用 `input-bindings` 属性反查实际绑定的物理键，跟用户
+// 自定义按键保持一致，也顺带覆盖了重复键位（比如 set-a 同时绑了 `[` 和
+// `【`，confirm-yes/no 理论上也可能这样重复绑定）。
 std::vector<std::string> keys_bound_to_script_binding(mpv_handle *h, const std::string &binding_name) {
     std::vector<std::string> keys;
     std::string needle = "script-binding " + binding_name;
@@ -746,17 +701,8 @@ void on_load_loops(PluginState &state) {
         mpv_util::show_osd_message(state.handle, "Loops loaded", kStateOsdDuration);
         break;
     case store::LookupResult::Kind::kSingleCandidate: {
-        // mpv 没有原生弹窗，靠 OSD 文字 + 临时抢占 confirm-yes/confirm-no 两
-        // 个键来实现确认（SPEC §6）。存档里只有路径的哈希，插件这边压根拿不
-        // 到那条旧路径的明文，提示文案不带路径，不是能带但故意藏起来。
-        //
-        // 用户在还没看清/回答这条提示之前，不能让播放继续、也不能让其他按
-        // 键趁机做别的编辑操作（比如手滑碰到 set-a 又插入一段），所以：
-        // 1. 记住确认前的 pause 状态，强制暂停；
-        // 2. 尝试启用独占按键区段（engage_confirm_lockout，找不到 y/n 对应
-        //    的物理键时会返回 false，安全退化成不锁键，避免死锁）；
-        // 3. OSD 用一个 24h 的超长时长模拟"常驻直到用户回答"（show-text 没
-        //    有真正的"永久"选项，见 kConfirmOsdDurationSeconds 的注释）。
+        // 存档里只有路径的哈希，插件这边压根拿不到那条旧路径的明文，提示
+        // 文案不带路径，不是能带但故意藏起来。
         state.pending_confirmation = result;
         state.paused_before_confirm = mpv_util::get_flag(state.handle, "pause", false);
         mpv_util::set_flag(state.handle, "pause", true);
@@ -784,9 +730,7 @@ void on_confirm(PluginState &state, bool yes) {
     store::LookupResult result = *state.pending_confirmation;
     state.pending_confirmation.reset();
 
-    // 不管答的是 y 还是 n，都要解除独占按键区段、把 pause 还原成确认前的
-    // 状态——本来就是暂停的话不该被顺手取消暂停，见 paused_before_confirm
-    // 的注释。
+    // 不管答的是 y 还是 n，都要解除独占按键区段、还原 pause 状态。
     release_confirm_lockout(state);
     mpv_util::set_flag(state.handle, "pause", state.paused_before_confirm);
 
@@ -801,13 +745,10 @@ void on_confirm(PluginState &state, bool yes) {
                                 kStateOsdDuration);
 }
 
-// ---- 文件生命周期 ----
-
 void on_file_loaded(PluginState &state) {
-    // 理论上确认锁键期间几乎不可能触发新文件加载（独占区段吞掉了正常的
-    // 切换文件按键），但外部 IPC 仍可能在这期间发 loadfile/playlist-next；
-    // 防御性地把独占区段解除掉，避免文件切换之后独占状态还残留着，把新
-    // 文件的正常操作也锁死。
+    // 理论上确认锁键期间几乎不可能触发新文件加载，但外部 IPC 仍可能在这
+    // 期间发 loadfile/playlist-next；防御性地解除独占区段，避免残留下去
+    // 把新文件的正常操作也锁死。
     if (state.pending_confirmation) {
         release_confirm_lockout(state);
     }
@@ -828,8 +769,6 @@ void on_file_loaded(PluginState &state) {
         state.current_path.clear();
     }
 
-    // current_path 只留在内存里用来实际读文件、算哈希；写进存档文件的
-    // current_path_key 是它的哈希，不会把真实路径持久化到磁盘上。
     state.current_path_key = state.current_path.empty() ? "" : store::compute_path_hash(state.current_path);
 
     state.current_content_hash.clear();
@@ -848,11 +787,9 @@ void on_end_file(PluginState &state) {
     clear_ab_loop_point(state.handle, "ab-loop-b");
 }
 
-// ---- 按键分发：C 插件没有 mp.add_key_binding 那样的封装，参照
-// enhanced-drag 的写法，直接接住 mpv 转发过来的 "key-binding" client
-// message（input.rst:1399-1439：script-binding 命令内部就是这样转发的，不
-// 需要提前注册）----
-
+// C 插件没有 mp.add_key_binding 那样的封装，参照 enhanced-drag 的写法，直
+// 接接住 mpv 转发过来的 "key-binding" client message（input.rst:1399-1439：
+// script-binding 命令内部就是这样转发的，不需要提前注册）。
 void handle_client_message(PluginState &state, mpv_event_client_message *message) {
     if (message->num_args < 3 || std::strcmp(message->args[0], "key-binding") != 0) {
         return;
@@ -929,10 +866,8 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
             break;
         case MPV_EVENT_SEEK:
         case MPV_EVENT_PLAYBACK_RESTART:
-            // SPEC §2.1 第 2 点：确认已经落到某个 active 项的起点后，判断
-            // 是不是原生自环刚播完这一项、要不要补一次跨段跳转（见
-            // on_native_landing 的注释）。两个事件都可能触发，重复调用是
-            // 幂等的，不需要去重。
+            // 两个事件都可能触发，重复调用是幂等的，不需要去重（见
+            // on_native_landing 的注释）。
             MPV_UTIL_DEBUG("event: {} pos={:.3f}\n",
                             event->event_id == MPV_EVENT_SEEK ? "SEEK" : "PLAYBACK_RESTART",
                             time_pos(state.handle));

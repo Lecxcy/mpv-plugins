@@ -400,4 +400,13 @@ JumpPair compute_jump_pair(const std::vector<ActiveEntry> &order, std::size_t la
     return pair;
 }
 
+SegmentDisplayPlan plan_segment_display(std::size_t total, std::size_t max_visible) {
+    if (total <= max_visible) {
+        return SegmentDisplayPlan{total, 0, 0};
+    }
+    std::size_t head = max_visible / 2;
+    std::size_t tail = max_visible - head;
+    return SegmentDisplayPlan{head, total - head - tail, tail};
+}
+
 } // namespace enhanced_ab_loop

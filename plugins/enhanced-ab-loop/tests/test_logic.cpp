@@ -14,8 +14,6 @@ Segment make(double a, double b, bool enabled = true) {
 
 } // namespace
 
-// ---- §1.1 排序：修复旧的 epsilon tie-break 不满足传递性的 bug ----
-
 TEST_CASE("sort_segments orders strictly by a with no epsilon fuzzing", "[logic][sort]") {
     std::vector<Segment> segments{make(10, 20), make(0, 5), make(30, 40)};
     sort_segments(segments);
@@ -42,8 +40,6 @@ TEST_CASE("sort_segments stays correct for closely-spaced segments that used to 
     CHECK(segments[2].a == Approx(0.008));
 }
 
-// ---- 查找/重叠 ----
-
 TEST_CASE("find_complete_index_at requires strictly inside, boundary itself is not inside",
           "[logic][find]") {
     std::vector<Segment> segments{make(10, 20)};
@@ -68,8 +64,6 @@ TEST_CASE("overlaps_complete detects exact-boundary touching as non-overlap", "[
     CHECK(overlaps_complete(segments, 4, 11).has_value());       // 真正跨进两段
     CHECK(overlaps_complete(segments, 12, 18).has_value());      // 完全落在一段内部
 }
-
-// ---- §3.1 插入 / Move ----
 
 TEST_CASE("set_a then set_b in a gap inserts an independent new segment", "[logic][insert]") {
     std::vector<Segment> segments;
@@ -167,8 +161,6 @@ TEST_CASE("Move A/B never crosses into a neighbouring segment because the strict
     CHECK(segments[1].a == Approx(12));
 }
 
-// ---- §3.2 extend ----
-
 TEST_CASE("extend_prev stretches the preceding segment's end into the gap", "[logic][extend]") {
     std::vector<Segment> segments{make(0, 5), make(10, 20)};
     Pending pending;
@@ -217,8 +209,6 @@ TEST_CASE("extend is denied when there is no neighbour in that direction", "[log
     CHECK_FALSE(extend_next(segments, pending, 25).ok()); // 后面没有区间
 }
 
-// ---- §3.3 nudge：触发条件放宽到闭区间，顶到边界拒绝而不是静默 clamp ----
-
 TEST_CASE("nudge_a triggers right at the boundary itself, not just strictly inside", "[logic][nudge]") {
     std::vector<Segment> segments{make(10, 20)};
     // 落在 a 本身（循环刚跳回来时最典型的场景），旧的严格 is_strictly_inside
@@ -253,8 +243,6 @@ TEST_CASE("nudge_a allowed to touch exactly the previous segment's end", "[logic
     CHECK(r.ok());
     CHECK(segments[1].a == Approx(5));
 }
-
-// ---- §3.4 撤销端点：修复“显示嫁接到邻居”的 bug ----
 
 TEST_CASE("unset_a splits a complete segment into an independent pending point, without touching "
           "any neighbouring segment (regression test for the old '嫁接到邻居' bug)",
@@ -299,8 +287,6 @@ TEST_CASE("unset_a/unset_b on an already-pending point just clears that half", "
     CHECK(pending.empty());
 }
 
-// ---- §5 选段 ----
-
 TEST_CASE("toggle_segment flips enabled for the segment the cursor is inside", "[logic][toggle]") {
     std::vector<Segment> segments{make(10, 20)};
     CHECK(segments[0].enabled);
@@ -312,8 +298,6 @@ TEST_CASE("toggle_segment flips enabled for the segment the cursor is inside", "
     toggle_segment(segments, 15);
     CHECK(segments[0].enabled);
 }
-
-// ---- §2.1/§2.3 active 队列 ----
 
 TEST_CASE("build_active_order only includes enabled segments, sorted by a", "[logic][active]") {
     std::vector<Segment> segments{make(0, 5, true), make(10, 20, false), make(30, 40, true)};
@@ -400,13 +384,6 @@ TEST_CASE("locate_active_index finds the entry containing pos, falls back to nex
     CHECK_FALSE(locate_active_index({}, 5).has_value());
 }
 
-// ---- loop_reengage_target：关闭循环期间光标可能停在任何地方，重新打开
-// 循环时不能指望“接着往下播、碰巧自然落回循环范围”，见 logic.h 的注释里
-// 引用的 update_ab_loop_clip()（playloop.c:665）那条“pos 一旦超过目标终点
-// 就直接禁用 clip”的 mpv 行为——不显式 seek 过去，继续播放只会一路播到
-// 文件真正结束（配合 loop-file=inf 就表现成“从头重播”，而不是回到循环
-// 里，这正是从真实 mpv 会话里复现确认过的 bug）。----
-
 TEST_CASE("loop_reengage_target returns nullopt when pos is already inside an active entry",
           "[logic][reengage]") {
     std::vector<ActiveEntry> order{{2, 5.0}, {10, 15.0}};
@@ -450,8 +427,6 @@ TEST_CASE("loop_reengage_target on an empty order returns nullopt", "[logic][ree
     CHECK_FALSE(loop_reengage_target({}, 5.0).has_value());
 }
 
-// ---- §2.2 eof-reached 兜底：修复“硬编码跳第一段”的 bug ----
-
 TEST_CASE("eof_fallback_target returns the LAST entry's start, not the first one (regression test "
           "for the old active[1].a bug)",
           "[logic][eof]") {
@@ -474,19 +449,8 @@ TEST_CASE("eof_fallback_target on an empty order returns nullopt", "[logic][eof]
     CHECK_FALSE(eof_fallback_target({}).has_value());
 }
 
-// ---- §2.1（已修正）预置本段自己的 a/b + §4 尾帧冻结 ----
-//
-// 回归背景：旧版本这里测的是“ab_loop_a=下一段的起点”，配合原生 mpv 的
-// ab-loop-a/b 实现“零跳变”跨段预置。但 mpv 的 get_ab_loop_times()
-// （external/mpv/player/misc.c:124-141）在使用前恒定把 a/b 按大小
-// MPSWAP 排序——cutoff 恒取较大值，跳转目标恒取较小值，不管字面上写在
-// 哪个属性里。正向多段轮播时下一段的起点几乎总比本段的终点大，排序后
-// cutoff 变成了下一段的起点、跳转目标变成了本段自己的终点，实际效果是
-// “播过本段终点、一路播到下一段起点才被倒跳回本段终点”——完全不会跳到
-// 下一段（用真实 mpv 头文件 + headless IPC 驱动复现确认）。现在只预置
-// 本段自己的 a/b（恒 a<b，不会被排序坑），跨段跳转改在 plugin.cpp 里显式
-// 补一次 seek 完成。
-
+// 回归背景见 logic.cpp compute_jump_pair 的注释（mpv get_ab_loop_times()
+// 的 MPSWAP 排序坑）；用真实 mpv 头文件 + headless IPC 驱动复现确认过。
 TEST_CASE("compute_jump_pair predicts the CURRENT active entry's own bounds, not the next one's",
           "[logic][jump]") {
     std::vector<ActiveEntry> order{{0, 5.0}, {10, 20.0}, {30, 40.0}};
@@ -554,4 +518,56 @@ TEST_CASE("compute_jump_pair on an out-of-range index or empty order returns an 
     auto empty_pair = compute_jump_pair({}, 0, 100.0, 0.0);
     CHECK_FALSE(empty_pair.ab_loop_a.has_value());
     CHECK_FALSE(empty_pair.ab_loop_b.has_value());
+}
+
+TEST_CASE("plan_segment_display shows everything with no ellipsis when total is at or below the "
+          "limit",
+          "[logic][display]") {
+    CHECK(plan_segment_display(0, 12).head_count == 0);
+    CHECK(plan_segment_display(0, 12).hidden_count == 0);
+    CHECK(plan_segment_display(0, 12).tail_count == 0);
+
+    auto exact = plan_segment_display(12, 12);
+    CHECK(exact.head_count == 12);
+    CHECK(exact.hidden_count == 0);
+    CHECK(exact.tail_count == 0);
+
+    auto below = plan_segment_display(5, 12);
+    CHECK(below.head_count == 5);
+    CHECK(below.hidden_count == 0);
+    CHECK(below.tail_count == 0);
+}
+
+TEST_CASE("plan_segment_display splits head/tail evenly and reports the correct hidden count once "
+          "over the limit",
+          "[logic][display]") {
+    // 对应真实跑过的场景：25 个区间、上限 12，应该是首 6 + 隐藏 13 + 尾 6。
+    auto plan = plan_segment_display(25, 12);
+    CHECK(plan.head_count == 6);
+    CHECK(plan.hidden_count == 13);
+    CHECK(plan.tail_count == 6);
+    CHECK(plan.head_count + plan.hidden_count + plan.tail_count == 25);
+}
+
+TEST_CASE("plan_segment_display just one over the limit still hides exactly one entry",
+          "[logic][display]") {
+    auto plan = plan_segment_display(13, 12);
+    CHECK(plan.head_count == 6);
+    CHECK(plan.hidden_count == 1);
+    CHECK(plan.tail_count == 6);
+}
+
+TEST_CASE("plan_segment_display favours the tail by one when max_visible is odd (head = max/2, "
+          "rounded down)",
+          "[logic][display]") {
+    auto plan = plan_segment_display(50, 5);
+    CHECK(plan.head_count == 2);
+    CHECK(plan.tail_count == 3);
+    CHECK(plan.hidden_count == 45);
+}
+
+TEST_CASE("plan_segment_display uses kMaxVisibleSegments as the default limit", "[logic][display]") {
+    auto plan = plan_segment_display(kMaxVisibleSegments + 1);
+    CHECK(plan.head_count + plan.tail_count == kMaxVisibleSegments);
+    CHECK(plan.hidden_count == 1);
 }

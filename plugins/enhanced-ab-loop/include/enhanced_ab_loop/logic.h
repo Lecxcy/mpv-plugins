@@ -54,8 +54,6 @@ struct OpOutcome {
     bool ok() const { return status == OpStatus::kOk; }
 };
 
-// ---- SPEC §1.1：排序与查找，全部精确比较，不用 epsilon ----
-
 // 按 a 升序排序。比较函数只用 `<`，不做 epsilon tie-break——旧实现在这里
 // 因为 epsilon tie-break 不满足严格弱序，table.sort 不保证正确排序，是已
 // 确认的 bug。
@@ -82,29 +80,28 @@ std::optional<std::size_t> find_next_index(const std::vector<Segment> &segments,
 std::optional<std::size_t> overlaps_complete(const std::vector<Segment> &segments, double a, double b,
                                               std::optional<std::size_t> ignore_index = std::nullopt);
 
-// ---- SPEC §3.1：插入新区间 / Move A、B ----
-// 光标落在已有完整区间内部且 pending 为空 -> Move；否则 -> 插入新区间（永远
-// 不做隐式的边界借用/吞并，冲突直接拒绝）。
+// SPEC §3.1：光标落在已有完整区间内部且 pending 为空 -> Move；否则 -> 插入
+// 新区间（永远不做隐式的边界借用/吞并，冲突直接拒绝）。
 OpOutcome set_a(std::vector<Segment> &segments, Pending &pending, double pos);
 OpOutcome set_b(std::vector<Segment> &segments, Pending &pending, double pos);
 
-// ---- SPEC §3.2：extend，独立键位，不复用 set_a/set_b ----
+// SPEC §3.2：extend，独立键位，不复用 set_a/set_b。
 OpOutcome extend_prev(std::vector<Segment> &segments, const Pending &pending, double pos);
 OpOutcome extend_next(std::vector<Segment> &segments, const Pending &pending, double pos);
 
-// ---- SPEC §3.3：nudge，触发条件比 Move 宽松，顶到边界拒绝而非静默 clamp ----
+// SPEC §3.3：nudge，触发条件比 Move 宽松，顶到边界拒绝而非静默 clamp。
 OpOutcome nudge_a(std::vector<Segment> &segments, double pos, double delta);
 OpOutcome nudge_b(std::vector<Segment> &segments, double pos, double delta);
 
-// ---- SPEC §3.4：撤销端点 ----
+// SPEC §3.4：撤销端点。
 OpOutcome unset_a(std::vector<Segment> &segments, Pending &pending, double pos);
 OpOutcome unset_b(std::vector<Segment> &segments, Pending &pending, double pos);
 
-// ---- SPEC §5：选段循环 ----
+// SPEC §5：选段循环。
 OpOutcome toggle_segment(std::vector<Segment> &segments, double pos);
 
-// ---- SPEC §2.1 / §2.3：active 队列 ----
-// enabled 的完整区间 + pending 借来的临时项（近端边界，见 SPEC §2.3）。
+// SPEC §2.1 / §2.3：active 队列 = enabled 的完整区间 + pending 借来的临时项
+// （近端边界，见 SPEC §2.3）。
 std::vector<ActiveEntry> build_active_order(const std::vector<Segment> &segments, const Pending &pending);
 
 // active_order 结构发生变化后，重新定位“当前应该在哪一项”：pos 落在某一项
@@ -157,5 +154,23 @@ struct JumpPair {
 
 JumpPair compute_jump_pair(const std::vector<ActiveEntry> &order, std::size_t landed_index,
                             double real_duration, double tail_freeze_seconds);
+
+// show-state 一次最多展示这么多行区间，超出的话首尾各留一半、中间用省略号
+// 代替——几十个区间挨个列出来会直接把 OSD 撑到超出屏幕范围。
+inline constexpr std::size_t kMaxVisibleSegments = 12;
+
+// 给定区间总数，算出应该展示的头部数量、尾部数量、以及中间被折叠掉的数量。
+// total <= kMaxVisibleSegments 时 hidden_count 恒为 0（不省略，全展示，
+// head_count == total）；否则首尾各留一半（kMaxVisibleSegments 为奇数时
+// 头比尾少一个），保证同时能看到最靠前和最靠后的区间，不是只留头或只留
+// 尾。纯算术，不关心 Segment 具体内容，调用方按 [0, head_count) 和
+// [total - tail_count, total) 两段下标去取实际的 Segment。
+struct SegmentDisplayPlan {
+    std::size_t head_count = 0;
+    std::size_t hidden_count = 0;
+    std::size_t tail_count = 0;
+};
+
+SegmentDisplayPlan plan_segment_display(std::size_t total, std::size_t max_visible = kMaxVisibleSegments);
 
 } // namespace enhanced_ab_loop

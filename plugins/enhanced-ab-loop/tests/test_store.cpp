@@ -7,8 +7,6 @@ using namespace enhanced_ab_loop;
 using namespace enhanced_ab_loop::store;
 using Catch::Approx;
 
-// ---- 内容采样哈希 ----
-
 TEST_CASE("compute_content_hash is deterministic for identical input", "[store][hash]") {
     auto h1 = compute_content_hash(1234, "head-bytes", "tail-bytes");
     auto h2 = compute_content_hash(1234, "head-bytes", "tail-bytes");
@@ -29,8 +27,6 @@ TEST_CASE("compute_content_hash differs when head or tail sample differs", "[sto
     CHECK(base != compute_content_hash(1000, "head-a", "tail-b"));
 }
 
-// ---- 路径 key 哈希：存档文件里不能明文出现真实路径 ----
-
 TEST_CASE("compute_path_hash is deterministic and differs across distinct paths", "[store][hash]") {
     auto h1 = compute_path_hash("/home/alice/videos/movie.mp4");
     auto h2 = compute_path_hash("/home/alice/videos/movie.mp4");
@@ -48,8 +44,6 @@ TEST_CASE("compute_path_hash output never contains the original path text (this 
     CHECK(hashed.find("secret-name") == std::string::npos);
     CHECK(hashed.find("someone") == std::string::npos);
 }
-
-// ---- §6 采样窗口算术：文件比采样窗口还小时头尾会不会算错 ----
 
 TEST_CASE("compute_sample_ranges: file larger than 2x the sample window has no overlap",
           "[store][sample-ranges]") {
@@ -104,8 +98,6 @@ TEST_CASE("compute_content_hash stays well-defined (no crash, deterministic) for
     CHECK(h1.size() == 16);
 }
 
-// ---- segments 序列化 ----
-
 TEST_CASE("serialize_segments / deserialize_segments round-trip preserves all fields",
           "[store][json]") {
     std::vector<Segment> segments{Segment{1.5, 2.5, true}, Segment{10.0, 20.0, false}};
@@ -129,15 +121,11 @@ TEST_CASE("deserialize_segments returns an empty list for malformed JSON instead
     CHECK(deserialize_segments("").empty());
 }
 
-// ---- archive 序列化 ----
-//
 // 下面这些用例里 Archive::entries 的 key 用了看着像明文路径的字符串
 // （"/videos/a.mp4" 这种），这是为了让测试用例本身可读；lookup/upsert/
 // Archive 这一层完全不关心 key 是不是真的路径，只把它当不透明字符串处理
 // ——生产代码路径上，plugin.cpp 会先用 compute_path_hash() 把真实路径转成
-// 哈希再传进来，明文路径本身不会到达这一层。compute_path_hash 自己的测试
-// 在上面「路径 key 哈希」那一节。
-
+// 哈希再传进来，明文路径本身不会到达这一层。
 TEST_CASE("serialize_archive / deserialize_archive round-trip preserves multiple path entries",
           "[store][json]") {
     Archive archive;
@@ -160,8 +148,6 @@ TEST_CASE("deserialize_archive returns an empty archive for malformed JSON", "[s
     CHECK(deserialize_archive("not json").entries.empty());
     CHECK(deserialize_archive("[]").entries.empty()); // 不是期望的 {"entries": {...}} 形状
 }
-
-// ---- §6 加载消歧 ----
 
 TEST_CASE("lookup returns an exact match with zero ambiguity when the path is present",
           "[store][lookup]") {
@@ -205,8 +191,6 @@ TEST_CASE("lookup on an empty archive reports kNoArchive", "[store][lookup]") {
     auto result = lookup(archive, "/videos/anything.mp4");
     CHECK(result.kind == LookupResult::Kind::kNoArchive);
 }
-
-// ---- §6 保存：改名迁移不应该让 entries 越攒越多 ----
 
 TEST_CASE("upsert without rename_from just adds/overwrites the current path's entry",
           "[store][upsert]") {

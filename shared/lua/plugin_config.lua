@@ -22,6 +22,8 @@ return {
     enhanced_seek = {
         step = 2,
         osd_duration = 1.2,
+        hold_delay = 0.28,
+        repeat_interval = 0.1,
     },
     enhanced_volume = {
         osd_duration = 1.2,

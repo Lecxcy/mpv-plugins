@@ -7,8 +7,9 @@
 
 来源、许可证与改动详情见各插件目录下的 README。
 
-- [drag-zoom-box](plugins/drag-zoom-box/README.md)（Lua）：仿 PotPlayer 的
-  手势 Zoom 逻辑并进行优化，仅放大框选范围。
+- [drag-zoom-box](plugins/drag-zoom-box/README.md)（C++）：仿 PotPlayer 的
+  手势 Zoom 逻辑并进行优化，仅放大框选范围，只认左上到右下、右下到左上
+  两个对角线方向。
 - [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)（C++）：仿 PotPlayer
   的 A/B Loop 表现并进行优化，支持设置多段不相交的 Loop 区间，并入了
   尾帧冻结能力。
@@ -18,7 +19,7 @@
   mpv 的旋转功能，支持 360 度循环。
 - [enhanced-seek](plugins/enhanced-seek/README.md)（Lua）：修改了 mpv 的快进/
   快退显示。
-- [enhanced-volume](plugins/enhanced-volume/README.md)（Lua）：修改了 mpv 的
+- [enhanced-volume](plugins/enhanced-volume/README.md)（C++）：修改了 mpv 的
   音量调整逻辑及显示，支持长按连续变化。
 - [tail-frame-extension](plugins/tail-frame-extension/README.md)（Lua）：缓
   解了 mpv 在 loop 跳转时跳过尾帧的问题；与 enhanced-ab-loop 同时使用时

@@ -55,5 +55,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 # 显式添加 C++ 插件；纯 Lua 插件不参与 CMake 构建。
 add_subdirectory(plugins/enhanced-rotation)
 add_subdirectory(plugins/enhanced-drag)
+add_subdirectory(plugins/drag-zoom-box)
 add_subdirectory(plugins/enhanced-ab-loop)
 add_subdirectory(plugins/enhanced-seek)
+add_subdirectory(plugins/enhanced-volume)

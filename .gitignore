@@ -1,4 +1,5 @@
 /build/
+/build-debug/
 /dist/
 /.cache/
 /cmake-build-*/

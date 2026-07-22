@@ -41,6 +41,14 @@ std::optional<Segment> segment_from_json(const nlohmann::json &item) {
     return seg;
 }
 
+nlohmann::json segments_to_json_array(const std::vector<Segment> &segments) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto &seg : segments) {
+        arr.push_back(segment_to_json(seg));
+    }
+    return arr;
+}
+
 std::vector<Segment> segments_from_json_array(const nlohmann::json &arr) {
     std::vector<Segment> result;
     if (!arr.is_array()) {
@@ -52,6 +60,74 @@ std::vector<Segment> segments_from_json_array(const nlohmann::json &arr) {
         }
     }
     return result;
+}
+
+nlohmann::json pending_to_json(const Pending &pending) {
+    return {{"has_a", pending.has_a}, {"has_b", pending.has_b}, {"a", pending.a}, {"b", pending.b}};
+}
+
+Pending pending_from_json(const nlohmann::json &item) {
+    Pending pending;
+    if (!item.is_object()) {
+        return pending;
+    }
+    pending.has_a = item.value("has_a", false);
+    pending.has_b = item.value("has_b", false);
+    pending.a = item.value("a", 0.0);
+    pending.b = item.value("b", 0.0);
+    return pending;
+}
+
+nlohmann::json snapshot_to_json(const Snapshot &snapshot) {
+    return {{"segments", segments_to_json_array(snapshot.segments)}, {"pending", pending_to_json(snapshot.pending)}};
+}
+
+// 老存档格式的条目只有 "segments" 字段（没有 "pending"），item.value 系的
+// contains 检查缺失字段时自然落到默认值，向后兼容不需要单独分支。
+Snapshot snapshot_from_json(const nlohmann::json &item) {
+    Snapshot snapshot;
+    if (!item.is_object()) {
+        return snapshot;
+    }
+    if (item.contains("segments")) {
+        snapshot.segments = segments_from_json_array(item["segments"]);
+    }
+    if (item.contains("pending")) {
+        snapshot.pending = pending_from_json(item["pending"]);
+    }
+    return snapshot;
+}
+
+nlohmann::json file_entry_to_json(const FileEntry &entry) {
+    nlohmann::json templates_json = nlohmann::json::object();
+    for (const auto &[slot, snapshot] : entry.templates) {
+        // JSON object 的 key 只能是字符串，槽位号（int）转成十进制字符串；
+        // 读回时用 std::stoi 还原，见 file_entry_from_json。
+        templates_json[std::to_string(slot)] = snapshot_to_json(snapshot);
+    }
+    nlohmann::json result = snapshot_to_json(entry.current);
+    result["templates"] = templates_json;
+    return result;
+}
+
+FileEntry file_entry_from_json(const nlohmann::json &item) {
+    FileEntry entry;
+    if (!item.is_object()) {
+        return entry;
+    }
+    entry.current = snapshot_from_json(item);
+    if (item.contains("templates") && item["templates"].is_object()) {
+        for (const auto &[key, value] : item["templates"].items()) {
+            try {
+                int slot = std::stoi(key);
+                entry.templates[slot] = snapshot_from_json(value);
+            } catch (const std::exception &) {
+                // 槽位号不是合法整数（存档被手动改坏），跳过这一条，不让
+                // 一条格式错误的数据拖垮整个 entry 的解析。
+            }
+        }
+    }
+    return entry;
 }
 
 } // namespace
@@ -94,11 +170,7 @@ SampleRanges compute_sample_ranges(std::uint64_t file_size, std::uint64_t max_sa
 }
 
 std::string serialize_segments(const std::vector<Segment> &segments) {
-    nlohmann::json arr = nlohmann::json::array();
-    for (const auto &seg : segments) {
-        arr.push_back(segment_to_json(seg));
-    }
-    return arr.dump();
+    return segments_to_json_array(segments).dump();
 }
 
 std::vector<Segment> deserialize_segments(const std::string &json_text) {
@@ -109,14 +181,34 @@ std::vector<Segment> deserialize_segments(const std::string &json_text) {
     }
 }
 
+std::string serialize_pending(const Pending &pending) {
+    return pending_to_json(pending).dump();
+}
+
+Pending deserialize_pending(const std::string &json_text) {
+    try {
+        return pending_from_json(nlohmann::json::parse(json_text));
+    } catch (const nlohmann::json::exception &) {
+        return Pending{};
+    }
+}
+
+std::string serialize_snapshot(const Snapshot &snapshot) {
+    return snapshot_to_json(snapshot).dump();
+}
+
+Snapshot deserialize_snapshot(const std::string &json_text) {
+    try {
+        return snapshot_from_json(nlohmann::json::parse(json_text));
+    } catch (const nlohmann::json::exception &) {
+        return Snapshot{};
+    }
+}
+
 std::string serialize_archive(const Archive &archive) {
     nlohmann::json entries = nlohmann::json::object();
-    for (const auto &[key, segments] : archive.entries) {
-        nlohmann::json arr = nlohmann::json::array();
-        for (const auto &seg : segments) {
-            arr.push_back(segment_to_json(seg));
-        }
-        entries[key] = {{"segments", arr}};
+    for (const auto &[key, entry] : archive.entries) {
+        entries[key] = file_entry_to_json(entry);
     }
     nlohmann::json root = {{"entries", entries}};
     return root.dump(2);
@@ -133,12 +225,8 @@ Archive deserialize_archive(const std::string &json_text) {
     if (!parsed.is_object() || !parsed.contains("entries") || !parsed["entries"].is_object()) {
         return archive;
     }
-    for (auto &[key, value] : parsed["entries"].items()) {
-        std::vector<Segment> segments;
-        if (value.is_object() && value.contains("segments")) {
-            segments = segments_from_json_array(value["segments"]);
-        }
-        archive.entries[key] = std::move(segments);
+    for (const auto &[key, value] : parsed["entries"].items()) {
+        archive.entries[key] = file_entry_from_json(value);
     }
     return archive;
 }
@@ -149,7 +237,7 @@ LookupResult lookup(const Archive &archive, const std::string &current_path_key)
     if (auto it = archive.entries.find(current_path_key); it != archive.entries.end()) {
         result.kind = LookupResult::Kind::kExactMatch;
         result.matched_key = current_path_key;
-        result.segments = it->second;
+        result.entry = it->second;
         return result;
     }
 
@@ -157,7 +245,7 @@ LookupResult lookup(const Archive &archive, const std::string &current_path_key)
         auto only = archive.entries.begin();
         result.kind = LookupResult::Kind::kSingleCandidate;
         result.matched_key = only->first;
-        result.segments = only->second;
+        result.entry = only->second;
         return result;
     }
 
@@ -165,12 +253,12 @@ LookupResult lookup(const Archive &archive, const std::string &current_path_key)
     return result;
 }
 
-void upsert(Archive &archive, const std::string &current_path_key, const std::vector<Segment> &segments,
+void upsert(Archive &archive, const std::string &current_path_key, const FileEntry &entry,
             std::optional<std::string> rename_from) {
     if (rename_from && *rename_from != current_path_key) {
         archive.entries.erase(*rename_from);
     }
-    archive.entries[current_path_key] = segments;
+    archive.entries[current_path_key] = entry;
 }
 
 } // namespace enhanced_ab_loop::store

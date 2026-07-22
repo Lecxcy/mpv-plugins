@@ -37,6 +37,16 @@ struct Pending {
 // 不经过这个常量。
 inline constexpr double kCursorEpsilon = 0.005;
 
+// 一份完整、独立的可持久化状态拷贝：segments + pending。“当前正在编辑的
+// 状态”和每一个模板槽位在数据形状上完全一样——模板不是对当前 segments 的
+// 引用或一份“启用掩码”，而是各自独立的一份拷贝。这样最简单的用法（同一批
+// segments、只是 enabled 不同的几个模板）和更进阶的用法（每个模板存完全
+// 不同的 segments）用的是同一套机制，不需要额外设计。
+struct Snapshot {
+    std::vector<Segment> segments;
+    Pending pending;
+};
+
 // SPEC §2.1：active 队列里的一项。b 为空表示“开放到文件真实末尾”，原生
 // ab-loop 机制表达不了（要求 a、b 都是有效值），需要靠 eof_fallback_target
 // 兜底，不会写入 ab-loop-b。

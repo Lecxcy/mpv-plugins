@@ -49,18 +49,41 @@ struct SampleRanges {
 
 SampleRanges compute_sample_ranges(std::uint64_t file_size, std::uint64_t max_sample_bytes);
 
-// 一个内容哈希文件内部的结构：路径 key（compute_path_hash 的输出，不是明文
-// 文件名）-> segments。
-struct Archive {
-    std::map<std::string, std::vector<Segment>> entries;
-};
-
 std::string serialize_segments(const std::vector<Segment> &segments);
 // 解析失败（格式非法/不是数组）按空列表处理，不抛异常给调用方。
 std::vector<Segment> deserialize_segments(const std::string &json_text);
 
+// pending 的独立序列化：跟 segments 同级但形状不同（单个对象，不是数组）。
+// 早期设计是“pending 不持久化”，讨论后改成需要支持——用户确实会在只设了
+// 一个端点、还没配对成完整区间时就想保存，不应该因为持久化层的限制而丢掉
+// 这部分状态。
+std::string serialize_pending(const Pending &pending);
+// 解析失败按空 pending（has_a/has_b 均为 false）处理。
+Pending deserialize_pending(const std::string &json_text);
+
+// Snapshot 的独立序列化（segments + pending 一起）。
+std::string serialize_snapshot(const Snapshot &snapshot);
+// 解析失败按空 Snapshot 处理。
+Snapshot deserialize_snapshot(const std::string &json_text);
+
+// 一个文件条目：当前正在编辑的状态（current，即 save-loops/load-loops 一直
+// 以来操作的那份数据），加上一组编号槽位（1-9）的模板快照。槽位号稀疏存
+// 储——没存过的槽位不占地方，也不需要占位 null。
+struct FileEntry {
+    Snapshot current;
+    std::map<int, Snapshot> templates;
+};
+
+// 两级 key：**内容采样哈希**（文件大小 + 头部采样字节 + 尾部采样字节）定位
+// 存档**文件**，**文件名的哈希**是文件内部用来区分具体条目的**次级 key**。
+struct Archive {
+    std::map<std::string, FileEntry> entries;
+};
+
 std::string serialize_archive(const Archive &archive);
-// 解析失败（格式非法）按空 archive 处理，不抛异常给调用方。
+// 解析失败（格式非法）按空 archive 处理，不抛异常给调用方。老格式的存档
+// （条目只有 "segments"，没有 "pending"/"templates" 字段）按“pending 为空、
+// 没有任何模板”处理，向后兼容，不需要一次性迁移脚本。
 Archive deserialize_archive(const std::string &json_text);
 
 struct LookupResult {
@@ -76,7 +99,7 @@ struct LookupResult {
     std::string matched_key; // kExactMatch/kSingleCandidate 时是命中的那条
                              // entry 的 key（哈希，不是明文路径），upsert
                              // 迁移时要传回这个值
-    std::vector<Segment> segments;
+    FileEntry entry;
 };
 
 LookupResult lookup(const Archive &archive, const std::string &current_path_key);
@@ -85,7 +108,7 @@ LookupResult lookup(const Archive &archive, const std::string &current_path_key)
 // 之后，传入 LookupResult::matched_key），把旧 key 那条 entry 迁移成当前
 // path key，不会让 entries 因为反复改名越攒越多；没有值就是普通的按当前
 // path key upsert。
-void upsert(Archive &archive, const std::string &current_path_key, const std::vector<Segment> &segments,
+void upsert(Archive &archive, const std::string &current_path_key, const FileEntry &entry,
             std::optional<std::string> rename_from);
 
 } // namespace enhanced_ab_loop::store

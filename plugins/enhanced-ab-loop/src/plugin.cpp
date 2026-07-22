@@ -5,9 +5,11 @@
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fmt/core.h>
@@ -40,6 +42,11 @@ struct PluginState {
     std::vector<Segment> segments;
     Pending pending;
     bool loop_enabled = true;
+
+    // 编号槽位（1-9）的模板快照，见 store::FileEntry::templates。只在内存
+    // 里管理增删改，落盘时机跟 segments/pending 一样——都要显式 Ctrl+S，
+    // 不单独自动持久化（SPEC §6 的"显式触发,不自动保存"原则延伸到这里）。
+    std::map<int, Snapshot> templates;
 
     // 原生 ab-loop 只能在"本段自己的 a/b"之间自环，跳到下一段靠自己监测到
     // 这个自环命中了本段的 a，再显式补一次 seek（见 refresh_loop /
@@ -262,6 +269,23 @@ void refresh_loop(PluginState &state) {
     state.armed_index = idx;
 }
 
+// 显式 seek 到 order 里下一项（wrap）自己的 a——这是"跨段"这个动作唯一的
+// 落地实现，两个调用方各自负责判断"什么时候该跨段"：on_native_landing 判定
+// "原生自环命中了自己的 a，这一段完整播完一轮了"；on_skip_next 是用户主动
+// 要求"不管播到哪了，立刻换下一段"。next == idx（order 只有一项，自己套
+// 自己）时没有"下一段"可去，不发 seek，返回 false。
+bool advance_to_next(PluginState &state, const std::vector<ActiveEntry> &order, std::size_t idx) {
+    std::size_t next = (idx + 1) % order.size();
+    if (next == idx) {
+        return false;
+    }
+    state.pending_self_seek = true;
+    std::string target = fmt::format("{:.6f}", order[next].a);
+    MPV_UTIL_DEBUG("advance_to_next: idx={} -> next={} a={}\n", idx, next, target);
+    run_command(state.handle, {"seek", target.c_str(), "absolute", "exact"});
+    return true;
+}
+
 // 只从 MPV_EVENT_SEEK / MPV_EVENT_PLAYBACK_RESTART 调用：判断"原生 ab-loop
 // 是不是刚自环命中了 armed_index 自己的 a"，是的话说明这一项已经完整播完
 // 一轮，显式补一次 seek 跳到 active_order 里下一项的起点。三个条件缺一都
@@ -307,16 +331,8 @@ void on_native_landing(PluginState &state, mpv_event_id event_id) {
         auto idx = locate_active_index(order, pos);
         is_completion = idx && *idx == *state.armed_index && order[*idx].b.has_value() &&
                         std::abs(pos - order[*idx].a) <= kCursorEpsilon;
-        if (is_completion) {
-            std::size_t next = (*idx + 1) % order.size();
-            if (next != *idx) {
-                state.pending_self_seek = true;
-                std::string target = fmt::format("{:.6f}", order[next].a);
-                MPV_UTIL_DEBUG("on_native_landing: idx={} finished, redirecting to next={} a={}\n", *idx, next,
-                                target);
-                run_command(state.handle, {"seek", target.c_str(), "absolute", "exact"});
-                return;
-            }
+        if (is_completion && advance_to_next(state, order, *idx)) {
+            return;
         }
     }
 
@@ -397,6 +413,13 @@ void show_state(PluginState &state, const std::string &prefix) {
         text << "\n... (" << plan.hidden_count << " more)";
         for (std::size_t i = total - plan.tail_count; i < total; ++i) {
             append_segment(state.segments[i]);
+        }
+    }
+
+    if (!state.templates.empty()) {
+        text << "\nTemplates:";
+        for (const auto &entry : state.templates) {
+            text << " " << entry.first;
         }
     }
 
@@ -501,6 +524,25 @@ void on_toggle_enabled(PluginState &state) {
     mpv_util::show_osd_message(state.handle, state.loop_enabled ? "loop on" : "loop off", kToggleOsdDuration);
 }
 
+// 用户主动"不想看完当前这段了，立刻换下一段"，跟 on_native_landing 里
+// "自然播完一轮"共用同一个 advance_to_next，只是触发条件不同：这里不管
+// 光标此刻具体停在段内哪个位置，只看它算落在 active_order 的哪一项。
+void on_skip_next(PluginState &state) {
+    if (!state.loop_enabled) {
+        mpv_util::show_osd_message(state.handle, "Loop is off", kToggleOsdDuration);
+        return;
+    }
+    auto order = build_active_order(state.segments, state.pending);
+    if (order.empty()) {
+        mpv_util::show_osd_message(state.handle, "No active segments", kToggleOsdDuration);
+        return;
+    }
+    auto idx = locate_active_index(order, time_pos(state.handle));
+    if (!idx || !advance_to_next(state, order, *idx)) {
+        mpv_util::show_osd_message(state.handle, "Only one active segment", kToggleOsdDuration);
+    }
+}
+
 struct ContentSample {
     std::uint64_t size = 0;
     std::string head;
@@ -566,16 +608,46 @@ std::string archive_path_for_hash(mpv_handle *h, const std::string &hash) {
     return dir + "/" + hash + ".json";
 }
 
-void apply_loaded_segments(PluginState &state, std::vector<Segment> segments) {
-    sort_segments(segments);
-    state.segments = std::move(segments);
-    state.pending.clear();
+// 从磁盘读档、或从内存里的模板槽位应用，最终都是"整份换掉当前状态"这同一
+// 个操作：segments 排序、写回 state，pending 原样带过去（不再无条件清空——
+// 快照本来就可能带着一个未闭合的端点，这是有意支持的，见 store.h 顶部的
+// 设计说明）。
+void apply_snapshot(PluginState &state, Snapshot snapshot) {
+    sort_segments(snapshot.segments);
+    state.segments = std::move(snapshot.segments);
+    state.pending = snapshot.pending;
 
-    // 存档加载进来的区间跟光标当前位置大概率对不上，同 on_unset_a。
+    // 换进来的区间跟光标当前位置大概率对不上，同 on_unset_a。
     auto order = build_active_order(state.segments, state.pending);
     if (!try_reengage_seek(state, order, time_pos(state.handle))) {
         refresh_loop(state);
     }
+}
+
+constexpr int kTemplateSlotMin = 1;
+constexpr int kTemplateSlotMax = 9;
+
+void on_template_apply(PluginState &state, int slot) {
+    auto it = state.templates.find(slot);
+    if (it == state.templates.end()) {
+        mpv_util::show_osd_message(state.handle, fmt::format("Template {} empty", slot), kToggleOsdDuration);
+        return;
+    }
+    apply_snapshot(state, it->second);
+    mpv_util::show_osd_message(state.handle, fmt::format("Applied template {}", slot), kToggleOsdDuration);
+}
+
+void on_template_save(PluginState &state, int slot) {
+    state.templates[slot] = Snapshot{state.segments, state.pending};
+    mpv_util::show_osd_message(state.handle, fmt::format("Saved template {} (Ctrl+S to persist to disk)", slot),
+                                kToggleOsdDuration);
+}
+
+void on_template_delete(PluginState &state, int slot) {
+    bool existed = state.templates.erase(slot) > 0;
+    mpv_util::show_osd_message(
+        state.handle, existed ? fmt::format("Deleted template {}", slot) : fmt::format("Template {} already empty", slot),
+        kToggleOsdDuration);
 }
 
 // mpv 没有原生弹窗，光靠"抢占 confirm-yes/confirm-no 两个 binding 名字"并
@@ -672,7 +744,10 @@ void on_save_loops(PluginState &state) {
         archive = store::deserialize_archive(*text);
     }
 
-    store::upsert(archive, state.current_path_key, state.segments, state.rename_from);
+    store::FileEntry entry;
+    entry.current = Snapshot{state.segments, state.pending};
+    entry.templates = state.templates;
+    store::upsert(archive, state.current_path_key, entry, state.rename_from);
     state.rename_from.reset();
 
     if (write_file_text(archive_path, store::serialize_archive(archive))) {
@@ -697,7 +772,8 @@ void on_load_loops(PluginState &state) {
     auto result = store::lookup(archive, state.current_path_key);
     switch (result.kind) {
     case store::LookupResult::Kind::kExactMatch:
-        apply_loaded_segments(state, result.segments);
+        state.templates = result.entry.templates;
+        apply_snapshot(state, result.entry.current);
         mpv_util::show_osd_message(state.handle, "Loops loaded", kStateOsdDuration);
         break;
     case store::LookupResult::Kind::kSingleCandidate: {
@@ -739,7 +815,8 @@ void on_confirm(PluginState &state, bool yes) {
         return;
     }
 
-    apply_loaded_segments(state, result.segments);
+    state.templates = result.entry.templates;
+    apply_snapshot(state, result.entry.current);
     state.rename_from = result.matched_key;
     mpv_util::show_osd_message(state.handle, "Loops loaded (will migrate archive on next save)",
                                 kStateOsdDuration);
@@ -756,6 +833,7 @@ void on_file_loaded(PluginState &state) {
     state.segments.clear();
     state.pending.clear();
     state.loop_enabled = true;
+    state.templates.clear();
     state.rename_from.reset();
     state.pending_confirmation.reset();
 
@@ -788,6 +866,21 @@ void on_end_file(PluginState &state) {
     clear_tail_extension(state);
     clear_ab_loop_point(state.handle, "ab-loop-a");
     clear_ab_loop_point(state.handle, "ab-loop-b");
+}
+
+// 模板类 binding 名字是 "template-<action>-<slot>" 这种带编号后缀的形式
+// （9 个槽位、3 个动作，枚举成 27 条固定字符串没有必要），从 binding 里剥掉
+// 前缀、把剩下部分解析成槽位号；不匹配前缀或者后缀不是合法整数都返回
+// nullopt，调用方顺着 else-if 链往下试下一个前缀。
+std::optional<int> slot_after_prefix(const std::string &binding, std::string_view prefix) {
+    if (binding.compare(0, prefix.size(), prefix) != 0) {
+        return std::nullopt;
+    }
+    try {
+        return std::stoi(binding.substr(prefix.size()));
+    } catch (const std::exception &) {
+        return std::nullopt;
+    }
 }
 
 // C 插件没有 mp.add_key_binding 那样的封装，参照 enhanced-drag 的写法，直
@@ -839,6 +932,17 @@ void handle_client_message(PluginState &state, mpv_event_client_message *message
         on_confirm(state, true);
     } else if (binding == "confirm-no") {
         on_confirm(state, false);
+    } else if (binding == "skip-next") {
+        on_skip_next(state);
+    } else if (auto slot = slot_after_prefix(binding, "template-apply-");
+               slot && *slot >= kTemplateSlotMin && *slot <= kTemplateSlotMax) {
+        on_template_apply(state, *slot);
+    } else if (auto slot = slot_after_prefix(binding, "template-save-");
+               slot && *slot >= kTemplateSlotMin && *slot <= kTemplateSlotMax) {
+        on_template_save(state, *slot);
+    } else if (auto slot = slot_after_prefix(binding, "template-delete-");
+               slot && *slot >= kTemplateSlotMin && *slot <= kTemplateSlotMax) {
+        on_template_delete(state, *slot);
     }
 }
 

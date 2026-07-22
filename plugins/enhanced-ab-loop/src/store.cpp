@@ -70,9 +70,18 @@ std::string compute_content_hash(std::uint64_t file_size, std::string_view head_
     return to_hex16(hash);
 }
 
+std::string extract_filename(std::string_view path) {
+    auto pos = path.find_last_of("/\\");
+    if (pos == std::string_view::npos) {
+        return std::string(path);
+    }
+    return std::string(path.substr(pos + 1));
+}
+
 std::string compute_path_hash(std::string_view path) {
     // 同一套 FNV-1a，跟内容哈希用途不同（这里只是给一个字符串算个不可逆的
-    // 短标识，不需要抗碰撞强度以外的属性），没必要换一种算法。
+    // 短标识，不需要抗碰撞强度以外的属性），没必要换一种算法。调用方传入的
+    // 是文件名（extract_filename 的输出），语义见 store.h 里的注释。
     return to_hex16(fnv1a_64(path, 0xcbf29ce484222325ULL));
 }
 

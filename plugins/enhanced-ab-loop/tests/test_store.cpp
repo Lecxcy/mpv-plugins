@@ -27,6 +27,23 @@ TEST_CASE("compute_content_hash differs when head or tail sample differs", "[sto
     CHECK(base != compute_content_hash(1000, "head-a", "tail-b"));
 }
 
+TEST_CASE("extract_filename strips leading directory components", "[store][filename]") {
+    CHECK(extract_filename("/home/alice/videos/movie.mp4") == "movie.mp4");
+    CHECK(extract_filename("C:\\Users\\alice\\videos\\movie.mp4") == "movie.mp4"); // Windows 反斜杠
+    CHECK(extract_filename("movie.mp4") == "movie.mp4"); // 没有目录部分，原样返回
+}
+
+TEST_CASE("extract_filename gives the same result regardless of which mount point the file "
+          "currently sits under (this is the whole point: external drives/NAS change mount "
+          "points, filenames don't)",
+          "[store][filename]") {
+    auto a = extract_filename("/Volumes/MobileDrive/Movies/foo.mp4");
+    auto b = extract_filename("/Volumes/MobileDrive-1/Movies/foo.mp4");
+    auto c = extract_filename("/Volumes/NAS/Media/Movies/foo.mp4");
+    CHECK(a == b);
+    CHECK(b == c);
+}
+
 TEST_CASE("compute_path_hash is deterministic and differs across distinct paths", "[store][hash]") {
     auto h1 = compute_path_hash("/home/alice/videos/movie.mp4");
     auto h2 = compute_path_hash("/home/alice/videos/movie.mp4");
@@ -124,8 +141,9 @@ TEST_CASE("deserialize_segments returns an empty list for malformed JSON instead
 // 下面这些用例里 Archive::entries 的 key 用了看着像明文路径的字符串
 // （"/videos/a.mp4" 这种），这是为了让测试用例本身可读；lookup/upsert/
 // Archive 这一层完全不关心 key 是不是真的路径，只把它当不透明字符串处理
-// ——生产代码路径上，plugin.cpp 会先用 compute_path_hash() 把真实路径转成
-// 哈希再传进来，明文路径本身不会到达这一层。
+// ——生产代码路径上，plugin.cpp 会先用 extract_filename() 把真实路径转成
+// 文件名，再用 compute_path_hash() 转成哈希传进来，明文路径本身不会到达
+// 这一层。
 TEST_CASE("serialize_archive / deserialize_archive round-trip preserves multiple path entries",
           "[store][json]") {
     Archive archive;

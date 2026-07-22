@@ -52,7 +52,7 @@ struct PluginState {
     bool pending_self_seek = false;
 
     std::string current_path;     // 只留在内存里读文件、算哈希，不写盘
-    std::string current_path_key; // current_path 的哈希，写进存档文件的是这个
+    std::string current_path_key; // current_path 文件名部分的哈希，写进存档文件的是这个
     std::string current_content_hash;
 
     // 这次会话是否是靠"唯一候选"借用了别的路径下的存档；非空时下次保存要
@@ -769,7 +769,10 @@ void on_file_loaded(PluginState &state) {
         state.current_path.clear();
     }
 
-    state.current_path_key = state.current_path.empty() ? "" : store::compute_path_hash(state.current_path);
+    // 用文件名（不是完整绝对路径）算 key：移动硬盘/NAS 换挂载点时绝对路径
+    // 会变，文件名不会，见 store.h compute_path_hash 的注释。
+    state.current_path_key =
+        state.current_path.empty() ? "" : store::compute_path_hash(store::extract_filename(state.current_path));
 
     state.current_content_hash.clear();
     if (!state.current_path.empty()) {

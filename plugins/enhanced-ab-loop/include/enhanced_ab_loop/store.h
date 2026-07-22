@@ -20,10 +20,20 @@ namespace enhanced_ab_loop::store {
 std::string compute_content_hash(std::uint64_t file_size, std::string_view head_sample,
                                   std::string_view tail_sample);
 
-// 路径 key 哈希：绝对路径本身不会明文写进存档文件（可能暴露目录结构、
-// 用户名、媒体库组织方式），存档里只保留这个哈希。调用方必须自己先把真实
-// 路径转成这个 key 再传给下面的 lookup/upsert/Archive——这一层不知道、也
-// 不需要知道真实路径长什么样。
+// 从完整路径里取出文件名部分（不含目录）。纯字符串处理，同时认 '/' 和
+// '\\' 两种分隔符（Windows 下 mpv 路径也可能带反斜杠），不做任何路径规范化
+// 或文件系统访问（不解析 . / ..，不追符号链接）。找不到分隔符时整个输入就
+// 是文件名，原样返回。
+std::string extract_filename(std::string_view path);
+
+// 路径 key 哈希：调用方传入的是 extract_filename() 的输出（文件名），不是
+// 完整绝对路径——绝对路径本身既不会明文写进存档文件（可能暴露目录结构、
+// 用户名、媒体库组织方式），也不适合直接做 key：移动硬盘/NAS 每次挂载点
+// 名字可能不一样，同一个文件的绝对路径会跟着变，导致存档在换挂载点后整体
+// 失联。文件名不受挂载点影响，只要不手动改文件名就能稳定命中；同一内容哈希
+// 文件里的重复文件本来就要求用不同文件名区分（见 SPEC.md §6），文件名天然
+// 满足这个消歧需求。调用方必须自己先把真实路径转成这个 key 再传给下面的
+// lookup/upsert/Archive——这一层不知道、也不需要知道真实路径长什么样。
 std::string compute_path_hash(std::string_view path);
 
 // 给定文件大小和采样窗口上限，算出头/尾各应该读多少字节、尾部从哪个偏移
@@ -40,7 +50,7 @@ struct SampleRanges {
 SampleRanges compute_sample_ranges(std::uint64_t file_size, std::uint64_t max_sample_bytes);
 
 // 一个内容哈希文件内部的结构：路径 key（compute_path_hash 的输出，不是明文
-// 路径）-> segments。
+// 文件名）-> segments。
 struct Archive {
     std::map<std::string, std::vector<Segment>> entries;
 };

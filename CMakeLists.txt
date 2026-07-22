@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.28) # FetchContent_Declare(... EXCLUDE_FROM_ALL) 需要 3.28+
 
 project(mpv_plugins LANGUAGES CXX)
 
@@ -33,17 +33,15 @@ FetchContent_Declare(
     fmt
     GIT_REPOSITORY https://github.com/fmtlib/fmt.git
     GIT_TAG 12.2.0
+    EXCLUDE_FROM_ALL
 )
-# 用 EXCLUDE_FROM_ALL 手动 populate，只用 fmt::fmt-header-only 这个纯头文件
-# INTERFACE 目标：fmt 自带的预编译 src/format.cc 在较新 Clang（AppleClang
-# 21+）下因 consteval 处理差异编译失败，EXCLUDE_FROM_ALL 让默认构建不去碰
-# 这个用不到的目标，绕开这个上游兼容性问题；纯头文件对我们这种调用量不大
-# 的用法没有明显运行时代价。
-FetchContent_GetProperties(fmt)
-if(NOT fmt_POPULATED)
-    FetchContent_Populate(fmt)
-    add_subdirectory(${fmt_SOURCE_DIR} ${fmt_BINARY_DIR} EXCLUDE_FROM_ALL)
-endif()
+# 只用 fmt::fmt-header-only 这个纯头文件 INTERFACE 目标：fmt 自带的预编译
+# src/format.cc 在较新 Clang（AppleClang 21+）下因 consteval 处理差异编译
+# 失败，EXCLUDE_FROM_ALL（CMake 3.28+ 起 FetchContent_Declare 原生支持，
+# 直接透传给底层 add_subdirectory）让默认构建不去碰这个用不到的目标，绕开
+# 这个上游兼容性问题；纯头文件对我们这种调用量不大的用法没有明显运行时
+# 代价。
+FetchContent_MakeAvailable(fmt)
 
 FetchContent_Declare(
     nlohmann_json

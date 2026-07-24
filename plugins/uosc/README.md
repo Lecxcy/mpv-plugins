@@ -94,11 +94,19 @@
   色块渲染，避免同一个边界同时画三角形和色块两份重复信息。不改动其他任何
   渲染逻辑或布局代码。
 - **`main.lua`**：新增一个 `mp.observe_property('user-data/
-  enhanced-ab-loop/segments', 'string', ...)`，解析 enhanced-ab-loop 发布
-  的 JSON 写进 `state.ab_loop_segments`（跟已有的 `ab-loop-a`/`chapter-list`
-  等 observer 是同一种写法）；`state` 初始表里加了对应的空表默认值。
-  enhanced-ab-loop 插件不存在或还没设置过这个属性时，`json` 是 `nil`，保持
-  空列表，不影响其他任何功能。
+  enhanced-ab-loop/segments', 'native', ...)`，把 enhanced-ab-loop 发布的
+  table 直接写进 `state.ab_loop_segments`（跟已有的
+  `ab-loop-a`/`chapter-list` 等 observer 是同一种写法）；`state` 初始表里
+  加了对应的空表默认值。enhanced-ab-loop 插件不存在或还没设置过这个属性
+  时，值是 `nil`，保持空列表，不影响其他任何功能。**踩过的坑**：最初这
+  里用的是 `'string'` 格式 + `mp.utils.parse_json` 解析 JSON 文本，结果
+  发现 `parse_json` 处理"从 `observe_property` 回调参数拿到的字符串"时会
+  静默返回原字符串本身、不是解析出的 table（也不报错，`get_property`/日志
+  全都看着正常），导致进度条上什么都画不出来——用真实窗口截图逐像素采样
+  才定位到问题不在渲染代码，而在这一步解析失败。改成让 enhanced-ab-loop
+  直接发布原生 `MPV_FORMAT_NODE`（而不是 JSON 字符串）、这里用 `'native'`
+  格式接收后，问题消失，具体原因见
+  [enhanced-ab-loop 的 README](../enhanced-ab-loop/README.md#实现说明)。
 - 具体的"发布"那一侧改动（`user-data/enhanced-ab-loop/segments` 属性怎么
   写入）在 [enhanced-ab-loop 的 README](../enhanced-ab-loop/README.md#实现说明)
   里，不在这个仓库范围内重复。
@@ -111,4 +119,10 @@
   enhanced-ab-loop 的区间展示集成（见上方"相对上游的改动"）；随后根据实测
   反馈调整了三处：区间显示不再依赖 `ab-loop-a`/主循环开关（改成直接比较
   `state.time`）、原有的单一三角形标记在有区间列表时让位给实心色块（避免
-  重复），确认多段区间会同时全部画出来，不再只剩一段。
+  重复），确认多段区间会同时全部画出来，不再只剩一段；随后发现这几处改动
+  在真机上跟改之前毫无视觉差异，用真实窗口截图排查后定位到根因其实是
+  `user-data/enhanced-ab-loop/segments` 用 JSON 字符串 + `parse_json`
+  这条链路会静默解析失败（`state.ab_loop_segments` 一直是空表），把这个
+  observer 换成 `'native'` 格式接收 enhanced-ab-loop 直接发布的
+  `MPV_FORMAT_NODE` 后解决，用截图逐像素采样确认了两段区间同时正确显示
+  为实心色块。

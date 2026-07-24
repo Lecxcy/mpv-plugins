@@ -713,12 +713,16 @@ mp.observe_property('loop-file', 'native', create_state_setter('loop_file'))
 mp.observe_property('ab-loop-a', 'number', create_state_setter('ab_loop_a'))
 mp.observe_property('ab-loop-b', 'number', create_state_setter('ab_loop_b'))
 -- enhanced-ab-loop 插件（本仓库维护的派生插件，不是上游 uosc 的一部分）把
--- 完整的多段区间列表发布在这个 user-data 属性上（JSON 字符串，见其
--- plugin.cpp 的 refresh_loop），供 Timeline 画出每一段的范围和 enabled
--- 状态；插件不存在或还没设置过这个属性时，json 是 nil，保持空列表即可。
-mp.observe_property('user-data/enhanced-ab-loop/segments', 'string', function(_, json)
-	local segments = json and json ~= '' and utils.parse_json(json) or nil
-	set_state('ab_loop_segments', type(segments) == 'table' and segments or {})
+-- 完整的多段区间列表发布在这个 user-data 属性上，供 Timeline 画出每一段的
+-- 范围和 enabled 状态。属性是原生 MPV_FORMAT_NODE（array of {a, b,
+-- enabled}，见其 plugin.cpp 的 publish_segments_property），不是 JSON
+-- 字符串——曾经试过用字符串 + mp.utils.parse_json，结果发现从
+-- observe_property 回调参数拿到的字符串传给 parse_json 会静默返回原字符串
+-- 而不是解析出的 table（同一个 parse_json 处理字面量字符串完全正常），
+-- 改成 'native' 格式直接拿 table 就完全绕开了这个坑。插件不存在或还没
+-- 设置过这个属性时，value 是 nil，保持空列表即可。
+mp.observe_property('user-data/enhanced-ab-loop/segments', 'native', function(_, value)
+	set_state('ab_loop_segments', type(value) == 'table' and value or {})
 	request_render()
 end)
 mp.observe_property('playlist-pos-1', 'number', create_state_setter('playlist_pos'))

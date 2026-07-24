@@ -1,5 +1,6 @@
 #include <mpv/client.h>
 
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -230,6 +231,50 @@ bool try_reengage_seek(PluginState &state, const std::vector<ActiveEntry> &order
     return true;
 }
 
+// 把 segments 发布成 user-data/ 属性供 uosc 消费（见 refresh_loop 里的调用
+// 点）。特意构造原生 MPV_FORMAT_NODE（array of {a: double, b: double,
+// enabled: flag}），不是 mpv_set_property_string 写一份 JSON 字符串——曾经
+// 试过 JSON 字符串 + uosc 那边 observe_property(..., 'string', ...) 后
+// 用 mp.utils.parse_json 解析，结果发现 mpv 的 Lua 绑定里，从
+// observe_property 回调参数拿到的字符串传给 utils.parse_json 会静默返回
+// 原字符串本身而不是解析出的 table（直接构造的字符串字面量传给
+// parse_json 完全正常，只有从属性变更回调里拿到的字符串会触发这个问题，
+// 具体原因没有深挖，怀疑是 mpv Lua 绑定某种字符串来源的差异）；改成原生
+// node + observe_property(..., 'native', ...) 后 uosc 直接拿到 Lua
+// table，完全绕开这个坑，也少一次字符串编解码。
+void publish_segments_property(mpv_handle *h, const std::vector<Segment> &segments) {
+    static char key_a[] = "a";
+    static char key_b[] = "b";
+    static char key_enabled[] = "enabled";
+
+    std::vector<std::array<mpv_node, 3>> map_values(segments.size());
+    std::vector<std::array<char *, 3>> map_keys(segments.size());
+    std::vector<mpv_node_list> maps(segments.size());
+    std::vector<mpv_node> array_values(segments.size());
+
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        map_values[i][0] = {.u = {.double_ = segments[i].a}, .format = MPV_FORMAT_DOUBLE};
+        map_values[i][1] = {.u = {.double_ = segments[i].b}, .format = MPV_FORMAT_DOUBLE};
+        map_values[i][2] = {.u = {.flag = segments[i].enabled ? 1 : 0}, .format = MPV_FORMAT_FLAG};
+        map_keys[i] = {key_a, key_b, key_enabled};
+
+        maps[i].num = static_cast<int>(map_values[i].size());
+        maps[i].values = map_values[i].data();
+        maps[i].keys = map_keys[i].data();
+
+        array_values[i].format = MPV_FORMAT_NODE_MAP;
+        array_values[i].u.list = &maps[i];
+    }
+
+    mpv_node_list array_list{.num = static_cast<int>(segments.size()), .values = array_values.data(),
+                              .keys = nullptr};
+    mpv_node root{.u = {.list = &array_list}, .format = MPV_FORMAT_NODE_ARRAY};
+
+    // mpv_set_property copies the node tree synchronously before returning,
+    // so the locals above only need to outlive this one call.
+    mpv_set_property(h, "user-data/enhanced-ab-loop/segments", MPV_FORMAT_NODE, &root);
+}
+
 // 无条件按"当前光标落在 active_order 的哪一项"重新预置 ab-loop-a/b，不做
 // 任何跨段跳转判断——判断"是不是该跳到下一项了"是 on_native_landing 专门
 // 的职责，两者不能混在一起，否则编辑操作里凑巧把光标停在某项自己的 a 上
@@ -238,14 +283,9 @@ bool try_reengage_seek(PluginState &state, const std::vector<ActiveEntry> &order
 // 每一处会改动 state.segments/pending/loop_enabled 的操作最终都会调用这
 // 个函数（直接调用，或者经 try_reengage_seek 失败后兜底调用），是唯一的
 // 汇合点，所以把"把完整 segments 列表发布给其他脚本"也放在这里最简单——
-// 不用在十几个调用点分别补一行。发布用 user-data/ 属性子树（mpv 里专门给
-// "脚本/插件之间共享任意数据"设计的机制，可读可写可 observe），uosc 那边
-// （plugins/uosc/lua/main.lua）observe 这个属性来在进度条上画出每一段的
-// 范围和 enabled 状态。复用 store::serialize_segments——跟存档用的是同一
-// 份、已经有单元测试覆盖的序列化实现，不重新发明格式。
+// 不用在十几个调用点分别补一行。
 void refresh_loop(PluginState &state) {
-    mpv_set_property_string(state.handle, "user-data/enhanced-ab-loop/segments",
-                             store::serialize_segments(state.segments).c_str());
+    publish_segments_property(state.handle, state.segments);
 
     double pos = time_pos(state.handle);
     auto order = build_active_order(state.segments, state.pending);

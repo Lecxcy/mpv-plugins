@@ -540,15 +540,22 @@ seek 范围不包含这段——但原生 ab-loop 的判断根本不依赖 `dura
       区段(理论上独占键期间正常路径切换不了文件，但不排除外部 IPC 在这
       期间发 `loadfile`)。
 
-## 7. 与 uosc 的关系(占位，未实现)
+## 7. 与 uosc 的关系(2026-07-25 已实现)
 
 - `loop_enabled = true` 且存在唯一"当前 active 区间"时，§2.3 写入的
   `ab-loop-a`/`ab-loop-b` 就是 mpv 原生属性，uosc 不需要任何改动就能读到
   并画出当前激活区间的括号标记(`Timeline.lua` 已经支持渲染原生
   `ab-loop-a`/`ab-loop-b`)。
-- 要显示全部多段区间(而不是只有当前激活的一段)，需要另开一个派生插件
-  fork `external/plugins/uosc`(LGPL-2.1)，只改 `Timeline.lua` 里渲染色块
-  的部分，按 AGENTS.md 的派生插件规范进行，不在本插件范围内。
+- 全部多段区间(不只是当前激活的一段)已经按 AGENTS.md 的派生插件规范 fork
+  了 `external/plugins/uosc`(LGPL-2.1)到 `plugins/uosc`，只改了
+  `Timeline.lua` 里渲染色块的部分：`refresh_loop`(§2 唯一的
+  segments/pending/loop_enabled 变更汇合点)把 `state.segments` 序列化
+  (复用 `store::serialize_segments`)写进 mpv 的 `user-data/
+  enhanced-ab-loop/segments` 属性，`plugins/uosc/lua/main.lua` observe
+  它、`elements/Timeline.lua` 按 `enabled` 画不同颜色，并用
+  `ab-loop-a == 这一段自己的 a`(精确浮点相等，因为 `compute_jump_pair`
+  写入时就是原样拷贝，没有中间运算)判定哪一段是当前被原生机制执行的，
+  加亮它的边框。详见 [README.md](README.md) 的"与 uosc 进度条的集成"。
 
 ## 8. 本轮实现踩过的坑
 

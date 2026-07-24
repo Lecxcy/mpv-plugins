@@ -384,6 +384,7 @@ state = {
 	ime_active = mp.get_property_native('input-ime'),
 	chapters = {},
 	chapter_ranges = {},
+	ab_loop_segments = {}, -- enhanced-ab-loop 插件发布的完整区间列表，见 user-data/enhanced-ab-loop/segments 的 observer
 	border = mp.get_property_native('border'),
 	title_bar = mp.get_property_native('title-bar'),
 	fullscreen = mp.get_property_native('fullscreen'),
@@ -711,6 +712,15 @@ mp.observe_property('title-bar', 'bool', create_state_setter('title_bar'))
 mp.observe_property('loop-file', 'native', create_state_setter('loop_file'))
 mp.observe_property('ab-loop-a', 'number', create_state_setter('ab_loop_a'))
 mp.observe_property('ab-loop-b', 'number', create_state_setter('ab_loop_b'))
+-- enhanced-ab-loop 插件（本仓库维护的派生插件，不是上游 uosc 的一部分）把
+-- 完整的多段区间列表发布在这个 user-data 属性上（JSON 字符串，见其
+-- plugin.cpp 的 refresh_loop），供 Timeline 画出每一段的范围和 enabled
+-- 状态；插件不存在或还没设置过这个属性时，json 是 nil，保持空列表即可。
+mp.observe_property('user-data/enhanced-ab-loop/segments', 'string', function(_, json)
+	local segments = json and json ~= '' and utils.parse_json(json) or nil
+	set_state('ab_loop_segments', type(segments) == 'table' and segments or {})
+	request_render()
+end)
 mp.observe_property('playlist-pos-1', 'number', create_state_setter('playlist_pos'))
 mp.observe_property('playlist-count', 'number', function(_, value)
 	set_state('playlist_count', value)

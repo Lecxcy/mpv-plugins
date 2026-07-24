@@ -234,7 +234,19 @@ bool try_reengage_seek(PluginState &state, const std::vector<ActiveEntry> &order
 // 任何跨段跳转判断——判断"是不是该跳到下一项了"是 on_native_landing 专门
 // 的职责，两者不能混在一起，否则编辑操作里凑巧把光标停在某项自己的 a 上
 // （比如 D1 测的那种边界落点）会被误判成"这一项播完了，跳下一项"。
+//
+// 每一处会改动 state.segments/pending/loop_enabled 的操作最终都会调用这
+// 个函数（直接调用，或者经 try_reengage_seek 失败后兜底调用），是唯一的
+// 汇合点，所以把"把完整 segments 列表发布给其他脚本"也放在这里最简单——
+// 不用在十几个调用点分别补一行。发布用 user-data/ 属性子树（mpv 里专门给
+// "脚本/插件之间共享任意数据"设计的机制，可读可写可 observe），uosc 那边
+// （plugins/uosc/lua/main.lua）observe 这个属性来在进度条上画出每一段的
+// 范围和 enabled 状态。复用 store::serialize_segments——跟存档用的是同一
+// 份、已经有单元测试覆盖的序列化实现，不重新发明格式。
 void refresh_loop(PluginState &state) {
+    mpv_set_property_string(state.handle, "user-data/enhanced-ab-loop/segments",
+                             store::serialize_segments(state.segments).c_str());
+
     double pos = time_pos(state.handle);
     auto order = build_active_order(state.segments, state.pending);
 

@@ -1,8 +1,10 @@
 # uosc
 
 替代 mpv 内置 `osc.lua` 的完整 OSD 皮肤 + 菜单系统（进度条、控制栏、音量、
-弹出菜单等）。当前只是从 `external/plugins/uosc` 原样复制过来准备做本地
-定制，尚未修改任何逻辑。
+弹出菜单等）。从 `external/plugins/uosc` fork 而来，本地只保留了进度条
+（Timeline）+ thumbfast 缩略图集成，其余元素通过 `uosc.conf` 的
+`disable_elements` 关闭；并给进度条加了一段本地渲染逻辑，展示
+[enhanced-ab-loop](../enhanced-ab-loop/README.md) 的多段循环区间。
 
 ## 来源
 
@@ -14,14 +16,18 @@
 
 ## 当前状态
 
-纯 Lua 实现，直接复制、未作任何改动：
+纯 Lua 实现：
 
 - `lua/`：对应上游 `src/uosc/` 目录（`main.lua` + `elements/`、`lib/`、
   `intl/`、`char-conv/`）。mpv 支持把 `scripts/` 下的一个目录当作脚本加载
   （目录里放 `main.lua`），所以这份 `lua/` 内容原样对应安装后的
-  `scripts/uosc/`。
+  `scripts/uosc/`。文件本身基本保持上游原样，只在 `main.lua`（新增一处
+  `user-data` 属性 observer）和 `elements/Timeline.lua`（新增一段区间渲染
+  循环）各改了不到 20 行，见下方"相对上游的改动"。
 - `uosc.conf`：对应上游 `src/uosc.conf`，全部配置项及默认值/注释，安装后
-  放到 `script-opts/uosc.conf`。
+  放到 `script-opts/uosc.conf`；本地把 `disable_elements` 从空改成了
+  `window_border,top_bar,controls,volume,idle_indicator,audio_indicator,
+  buffering_indicator,pause_indicator`，只留 `timeline`。
 - `fonts/`：`uosc_icons.otf`、`uosc_textures.ttf` 两个图标/纹理字体，安装
   后放到 `fonts/`。
 
@@ -67,7 +73,33 @@
 - `update`/`updater` 命令：查询 GitHub 最新 release，并可执行安装脚本
   自升级。
 
+上面这些当前全部通过 `disable_elements` 关闭了实例化（`Manager:_commit()`
+按这份名单决定要不要 `:new()`，被禁用的元素模块文件仍会被 `require`——
+零行为、零渲染、零事件——但不会执行任何逻辑），只保留 `Timeline` 和框架
+本身（`Element`/`Elements`/`Curtain`/`lib/std`/`lib/utils`/`lib/ass`/
+`lib/text`/`lib/cursor`/`lib/intl`）。
+
+## 相对上游的改动
+
+- **`elements/Timeline.lua`**：在原有的"Custom ranges"（`chapter_ranges`）
+  渲染块之后，新增一段循环，把 `state.ab_loop_segments` 里的每一段区间画
+  成进度条上的色块：`enabled=true` 的画绿色（`config.color.success`），
+  `enabled=false` 的画暗淡描边；再用 `ab-loop-a` 精确等于某段自己的 `a`
+  判定"当前正被原生 ab-loop 机制执行的是哪一段"，给它加亮边框。不改动其他
+  任何渲染逻辑或布局代码。
+- **`main.lua`**：新增一个 `mp.observe_property('user-data/
+  enhanced-ab-loop/segments', 'string', ...)`，解析 enhanced-ab-loop 发布
+  的 JSON 写进 `state.ab_loop_segments`（跟已有的 `ab-loop-a`/`chapter-list`
+  等 observer 是同一种写法）；`state` 初始表里加了对应的空表默认值。
+  enhanced-ab-loop 插件不存在或还没设置过这个属性时，`json` 是 `nil`，保持
+  空列表，不影响其他任何功能。
+- 具体的"发布"那一侧改动（`user-data/enhanced-ab-loop/segments` 属性怎么
+  写入）在 [enhanced-ab-loop 的 README](../enhanced-ab-loop/README.md#实现说明)
+  里，不在这个仓库范围内重复。
+
 ## 同步历史
 
 - 2026-07-25：从 `external/plugins/uosc`@`4104053`
-  （`5.12.0-15-g4104053`）完成初始复制，尚未做任何本地改动。
+  （`5.12.0-15-g4104053`）完成初始复制。同一天把 `disable_elements` 收紧到
+  只留 `timeline`，并给 `main.lua`/`elements/Timeline.lua` 加了跟
+  enhanced-ab-loop 的区间展示集成（见上方"相对上游的改动"）。

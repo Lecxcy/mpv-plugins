@@ -83,10 +83,16 @@
 
 - **`elements/Timeline.lua`**：在原有的"Custom ranges"（`chapter_ranges`）
   渲染块之后，新增一段循环，把 `state.ab_loop_segments` 里的每一段区间画
-  成进度条上的色块：`enabled=true` 的画绿色（`config.color.success`），
-  `enabled=false` 的画暗淡描边；再用 `ab-loop-a` 精确等于某段自己的 `a`
-  判定"当前正被原生 ab-loop 机制执行的是哪一段"，给它加亮边框。不改动其他
-  任何渲染逻辑或布局代码。
+  成进度条上的实心色块：`enabled=true` 的画绿色（`config.color.success`），
+  `enabled=false` 的画暗淡描边；"当前激活"（播放位置落在某个 enabled 区间
+  内）额外加亮边框——这个判定直接比较 `state.time` 和区间自己的
+  `a`/`b`，不依赖 `ab-loop-a`/`ab-loop-b`/`loop_enabled`，所以主循环开关
+  关闭时区间依然照常显示（只是不会再被 mpv 实际强制循环）。同时把原有的
+  "A-B loop indicators"（原生 `ab-loop-a`/`ab-loop-b` 画的两个三角形/风筝
+  形标记，只能表示唯一一个当前段）改成只在 `state.ab_loop_segments` 为空
+  时才画——一旦 enhanced-ab-loop 在发布完整区间列表，就完全交给上面的实心
+  色块渲染，避免同一个边界同时画三角形和色块两份重复信息。不改动其他任何
+  渲染逻辑或布局代码。
 - **`main.lua`**：新增一个 `mp.observe_property('user-data/
   enhanced-ab-loop/segments', 'string', ...)`，解析 enhanced-ab-loop 发布
   的 JSON 写进 `state.ab_loop_segments`（跟已有的 `ab-loop-a`/`chapter-list`
@@ -102,4 +108,7 @@
 - 2026-07-25：从 `external/plugins/uosc`@`4104053`
   （`5.12.0-15-g4104053`）完成初始复制。同一天把 `disable_elements` 收紧到
   只留 `timeline`，并给 `main.lua`/`elements/Timeline.lua` 加了跟
-  enhanced-ab-loop 的区间展示集成（见上方"相对上游的改动"）。
+  enhanced-ab-loop 的区间展示集成（见上方"相对上游的改动"）；随后根据实测
+  反馈调整了三处：区间显示不再依赖 `ab-loop-a`/主循环开关（改成直接比较
+  `state.time`）、原有的单一三角形标记在有区间列表时让位给实心色块（避免
+  重复），确认多段区间会同时全部画出来，不再只剩一段。

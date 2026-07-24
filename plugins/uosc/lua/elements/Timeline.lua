@@ -317,16 +317,19 @@ function Timeline:render()
 		ass:rect(rax, fay, rbx, fby, {color = chapter_range.color, opacity = chapter_range.opacity})
 	end
 
-	-- enhanced-ab-loop segments: each segment's own range, enabled (bright green)
-	-- vs disabled (dim outline), and the one currently armed by the native
-	-- ab-loop-a/b (bright border) get drawn distinctly. `ab_loop_a` is always set
-	-- to exactly the armed segment's own `a` (see compute_jump_pair), so an exact
-	-- match reliably identifies which rect is the one mpv is actively enforcing.
+	-- enhanced-ab-loop segments: each segment's own range gets a solid color
+	-- fill, independent of whether the native loop is currently on/off
+	-- (`state.loop_enabled`/`ab-loop-a`/`ab-loop-b` are irrelevant here on
+	-- purpose -- disabling the master loop switch shouldn't hide the ranges,
+	-- it only stops mpv from enforcing them). "Active" (playhead currently
+	-- inside this enabled segment) gets a brighter fill + border; this is
+	-- computed from `state.time` directly rather than matching `ab-loop-a`,
+	-- so it still lights up even while the master loop switch is off.
 	for _, segment in ipairs(state.ab_loop_segments) do
 		local rax = segment.a < 0.1 and bax or t2x(segment.a)
 		local rbx = segment.b > state.duration - 0.1 and bbx or t2x(math.min(segment.b, state.duration))
 		if segment.enabled then
-			local is_active = state.ab_loop_a ~= nil and math.abs(segment.a - state.ab_loop_a) < 0.001
+			local is_active = state.time and state.time >= segment.a and state.time < segment.b
 			ass:rect(rax, fay, rbx, fby, {
 				color = config.color.success,
 				opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
@@ -395,8 +398,16 @@ function Timeline:render()
 				end
 			end
 
-			-- A-B loop indicators
-			local has_a, has_b = state.ab_loop_a and state.ab_loop_a >= 0, state.ab_loop_b and state.ab_loop_b > 0
+			-- A-B loop indicators. Superseded by the full-range fills drawn
+			-- above once enhanced-ab-loop is publishing its segment list --
+			-- showing both would mean the same boundary gets a solid fill
+			-- *and* a triangle wedge on top of it, which is redundant. Only
+			-- fall back to the single-marker wedges when there's no segment
+			-- list at all (e.g. plain uosc without enhanced-ab-loop, or
+			-- enhanced-ab-loop loaded but no segments defined yet).
+			local has_ab_segments = #state.ab_loop_segments > 0
+			local has_a = not has_ab_segments and state.ab_loop_a and state.ab_loop_a >= 0
+			local has_b = not has_ab_segments and state.ab_loop_b and state.ab_loop_b > 0
 			local ab_radius = round(math.min(math.max(8, foreground_size * 0.25), foreground_size))
 
 			---@param time number

@@ -299,6 +299,77 @@ TEST_CASE("toggle_segment flips enabled for the segment the cursor is inside", "
     CHECK(segments[0].enabled);
 }
 
+TEST_CASE("solo_segment_toggle enables only the segment the cursor is inside, disabling the rest",
+          "[logic][toggle]") {
+    std::vector<Segment> segments{make(0, 5), make(10, 20), make(30, 40)};
+    SoloState solo_state;
+
+    auto r = solo_segment_toggle(segments, 15, solo_state);
+    CHECK(r.ok());
+    CHECK_FALSE(segments[0].enabled);
+    CHECK(segments[1].enabled);
+    CHECK_FALSE(segments[2].enabled);
+}
+
+TEST_CASE("solo_segment_toggle is denied when the cursor is not inside any complete segment",
+          "[logic][toggle]") {
+    std::vector<Segment> segments{make(0, 5), make(10, 20)};
+    SoloState solo_state;
+
+    auto r = solo_segment_toggle(segments, 7, solo_state);
+    CHECK_FALSE(r.ok());
+    CHECK(segments[0].enabled);
+    CHECK(segments[1].enabled);
+}
+
+TEST_CASE("solo_segment_toggle called twice on the same segment restores the exact prior enabled "
+          "state (not just 'enable everything')",
+          "[logic][toggle]") {
+    std::vector<Segment> segments{make(0, 5, true), make(10, 20, false), make(30, 40, true)};
+    SoloState solo_state;
+
+    auto r1 = solo_segment_toggle(segments, 15, solo_state);
+    CHECK(r1.ok());
+    CHECK_FALSE(segments[0].enabled);
+    CHECK(segments[1].enabled);
+    CHECK_FALSE(segments[2].enabled);
+
+    auto r2 = solo_segment_toggle(segments, 15, solo_state);
+    CHECK(r2.ok());
+    CHECK(segments[0].enabled);
+    CHECK_FALSE(segments[1].enabled); // 恢复成 solo 之前的样子，不是全部重新启用
+    CHECK(segments[2].enabled);
+    CHECK_FALSE(solo_state.prev_segments.has_value());
+}
+
+TEST_CASE("solo_segment_toggle on a different segment starts a fresh solo instead of undoing",
+          "[logic][toggle]") {
+    std::vector<Segment> segments{make(0, 5), make(10, 20), make(30, 40)};
+    SoloState solo_state;
+
+    solo_segment_toggle(segments, 15, solo_state); // solo 中间那段
+    auto r = solo_segment_toggle(segments, 35, solo_state); // 换成 solo 最后一段
+    CHECK(r.ok());
+    CHECK_FALSE(segments[0].enabled);
+    CHECK_FALSE(segments[1].enabled);
+    CHECK(segments[2].enabled);
+}
+
+TEST_CASE("solo_segment_toggle does not undo across a structural change to the segment list",
+          "[logic][toggle]") {
+    std::vector<Segment> segments{make(0, 5), make(10, 20)};
+    SoloState solo_state;
+
+    solo_segment_toggle(segments, 15, solo_state); // solo 第二段
+    segments.push_back(make(30, 40));              // 结构变了（比如中途新插入一段）
+
+    auto r = solo_segment_toggle(segments, 15, solo_state); // 再点回第二段
+    CHECK(r.ok());
+    CHECK_FALSE(segments[0].enabled);
+    CHECK(segments[1].enabled); // 又一次新的 solo，而不是恢复到最初全部启用
+    CHECK_FALSE(segments[2].enabled);
+}
+
 TEST_CASE("build_active_order only includes enabled segments, sorted by a", "[logic][active]") {
     std::vector<Segment> segments{make(0, 5, true), make(10, 20, false), make(30, 40, true)};
     Pending pending;

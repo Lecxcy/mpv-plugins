@@ -110,6 +110,24 @@ OpOutcome unset_b(std::vector<Segment> &segments, Pending &pending, double pos);
 // SPEC §5：选段循环。
 OpOutcome toggle_segment(std::vector<Segment> &segments, double pos);
 
+// SPEC §5：solo 操作的可撤销状态——记录"上一次 solo 之前"的完整快照（含
+// enabled，撤销时原样恢复）以及那次 solo 的目标下标。两者都为空表示当前
+// 没有可撤销的 solo。
+struct SoloState {
+    std::optional<std::vector<Segment>> prev_segments;
+    std::optional<std::size_t> prev_index;
+};
+
+// SPEC §5：solo——只启用光标所在的完整区间，其余全部禁用；再次在*同一个*
+// 区间上调用（且期间 segments 的 a/b 结构没有被别的操作改变过）会撤销回
+// 调用前的 enabled 状态，而不是重复应用一次没有意义的"全禁用只留它"。跟
+// toggle_segment 一样要求光标严格落在某个完整区间内部，落在空隙里直接
+// 拒绝，不做"最近的区间"之类的模糊匹配。换到另一个区间上调用则丢弃旧的
+// 撤销快照、重新记录一份新的（旧快照本身没有丢——它已经变成"新快照里
+// 保存的那份 enabled 状态"，只是不再能一次撤销回最初的状态，这跟
+// toggle_segment 反复调用只保留"最新一次"的语义是一致的）。
+OpOutcome solo_segment_toggle(std::vector<Segment> &segments, double pos, SoloState &solo_state);
+
 // SPEC §2.1 / §2.3：active 队列 = enabled 的完整区间 + pending 借来的临时项
 // （近端边界，见 SPEC §2.3）。
 std::vector<ActiveEntry> build_active_order(const std::vector<Segment> &segments, const Pending &pending);

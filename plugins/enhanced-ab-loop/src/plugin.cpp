@@ -65,6 +65,10 @@ struct PluginState {
     // 这次会话是否是靠"唯一候选"借用了别的路径下的存档；非空时下次保存要
     // 把那条 entry 迁移到当前路径，而不是新增一条，避免孤儿累积。
     std::optional<std::string> rename_from;
+    // solo-segment 的可撤销状态：再按一次 T 在同一个区间上能恢复回 solo
+    // 之前的 enabled 状态（见 solo_segment_toggle 注释）。
+    SoloState solo_state;
+
     std::optional<store::LookupResult> pending_confirmation;
     // pending_confirmation 非空期间：进入确认前的 pause 状态，回答完（无论
     // y/n）要还原回这个值，不能无条件恢复播放。
@@ -513,6 +517,18 @@ void on_toggle_segment(PluginState &state) {
     show_state(state, outcome.message);
 }
 
+void on_solo_segment(PluginState &state) {
+    auto outcome = solo_segment_toggle(state.segments, time_pos(state.handle), state.solo_state);
+    if (outcome.ok()) {
+        // 禁用其他所有段会把它们从 active_order 里摘掉，同 on_toggle_segment。
+        auto order = build_active_order(state.segments, state.pending);
+        if (!try_reengage_seek(state, order, time_pos(state.handle))) {
+            refresh_loop(state);
+        }
+    }
+    show_state(state, outcome.message);
+}
+
 void on_toggle_enabled(PluginState &state) {
     state.loop_enabled = !state.loop_enabled;
 
@@ -616,6 +632,8 @@ void apply_snapshot(PluginState &state, Snapshot snapshot) {
     sort_segments(snapshot.segments);
     state.segments = std::move(snapshot.segments);
     state.pending = snapshot.pending;
+    // 整体换了一批 segments，旧的 solo 撤销快照跟新数据对不上号，作废。
+    state.solo_state = SoloState{};
 
     // 换进来的区间跟光标当前位置大概率对不上，同 on_unset_a。
     auto order = build_active_order(state.segments, state.pending);
@@ -920,6 +938,8 @@ void handle_client_message(PluginState &state, mpv_event_client_message *message
         on_nudge_b(state, kNudgeStep);
     } else if (binding == "toggle-segment") {
         on_toggle_segment(state);
+    } else if (binding == "solo-segment") {
+        on_solo_segment(state);
     } else if (binding == "toggle-enabled") {
         on_toggle_enabled(state);
     } else if (binding == "show-state") {

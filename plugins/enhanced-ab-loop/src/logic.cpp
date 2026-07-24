@@ -272,6 +272,35 @@ OpOutcome toggle_segment(std::vector<Segment> &segments, double pos) {
     return {OpStatus::kOk, segments[*idx].enabled ? "Segment enabled" : "Segment disabled"};
 }
 
+OpOutcome solo_segment_toggle(std::vector<Segment> &segments, double pos, SoloState &solo_state) {
+    auto idx = find_complete_index_at(segments, pos);
+    if (!idx) {
+        return {OpStatus::kDenied, "Solo denied"};
+    }
+
+    // “结构没变”只比较 a/b，不比较 enabled——enabled 恰恰是这次要恢复的
+    // 那部分，比较它自己没有意义。
+    bool structurally_same = solo_state.prev_segments && solo_state.prev_segments->size() == segments.size() &&
+                              std::equal(solo_state.prev_segments->begin(), solo_state.prev_segments->end(),
+                                         segments.begin(), [](const Segment &prev, const Segment &cur) {
+                                             return prev.a == cur.a && prev.b == cur.b;
+                                         });
+
+    if (structurally_same && solo_state.prev_index == idx) {
+        segments = *solo_state.prev_segments;
+        solo_state.prev_segments.reset();
+        solo_state.prev_index.reset();
+        return {OpStatus::kOk, "Segment solo undone"};
+    }
+
+    solo_state.prev_segments = segments;
+    solo_state.prev_index = idx;
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        segments[i].enabled = (i == *idx);
+    }
+    return {OpStatus::kOk, "Segment solo"};
+}
+
 std::vector<ActiveEntry> build_active_order(const std::vector<Segment> &segments, const Pending &pending) {
     std::vector<ActiveEntry> order;
     order.reserve(segments.size() + 1);

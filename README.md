@@ -24,6 +24,8 @@
 - [tail-frame-extension](plugins/tail-frame-extension/README.md)（Lua）：缓
   解了 mpv 在 loop 跳转时跳过尾帧的问题；与 enhanced-ab-loop 同时使用时
   不需要加载本插件，能力已并入。
+- [uosc](plugins/uosc/README.md)（Lua）：替代 mpv 内置 `osc.lua` 的完整
+  OSD 皮肤 + 菜单系统，目前是从上游原样复制，准备进行本地定制。
 
 另有 [config/](config/README.md) 目录保存参考用的个人 `input.conf` /
 `mpv.conf`。
@@ -94,9 +96,10 @@ mpv --script=plugins/<本地插件名>/lua/<脚本名>.lua <媒体文件>
 
 ## 收集为可直接使用的 mpv 配置目录
 
-编译完成后，可以用 `scripts/collect-dist.sh` 把 `config/` 和已完成 C++ 重写
-的插件构建物（`.so`）收集到 `dist/`（默认路径，可传参数覆盖）。**尚未 C++
-重写的纯 Lua 插件不在收集范围内**，仍按上面"本地测试"里的方式单独加载：
+编译完成后，可以用 `scripts/collect-dist.sh` 把 `config/`、已完成 C++ 重写
+的插件构建物（`.so`）与已登记的纯 Lua 插件（目前是 uosc）收集到 `dist/`
+（默认路径，可传参数覆盖）。**其余尚未 C++ 重写、未登记的纯 Lua 插件不在
+收集范围内**，仍按上面"本地测试"里的方式单独加载：
 
 ```sh
 scripts/collect-dist.sh            # 默认 build/ -> dist/

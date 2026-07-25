@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 编译完成后，把 config/、已完成 C++ 重写的插件构建物（.so）与纯 Lua 插件
-# （目前只有 uosc）收集到一个可直接交给 mpv 使用的目录（默认 dist/），方便
-# 本地测试或分发。
+# （目前是 uosc、thumbfast）收集到一个可直接交给 mpv 使用的目录（默认
+# dist/），方便本地测试或分发。
 #
 # 尚未重写为 C++ 且未在下方 lua_plugins 列表中登记的插件仍是纯 Lua 实现，
 # 不在此脚本的收集范围内（见各插件 README 的"当前状态"）；等它们完成 C++
@@ -33,9 +33,12 @@ dist_dir="${2:-dist}"
 # 已完成 C++ 重写的插件；名字与 CMake target 名 / .so 文件名一致。
 cpp_plugins=(enhanced-rotation enhanced-drag drag-zoom-box enhanced-ab-loop enhanced-seek enhanced-volume)
 
-# 直接分发的纯 Lua 插件；每个名字对应 plugins/<name>/lua（复制为
-# scripts/<name>）。
-lua_plugins=(uosc)
+# 直接分发的纯 Lua 插件。每个名字对应 plugins/<name>/lua：如果里面有
+# main.lua（目录式脚本，比如 uosc），整个目录复制成 scripts/<name>/；
+# 否则按单文件脚本处理，复制 plugins/<name>/lua/<name>.lua 成
+# scripts/<name>.lua（比如 thumbfast——mpv 单文件脚本按文件名派生 client
+# 名称，必须保留 <name>.lua 这个文件名）。
+lua_plugins=(uosc thumbfast)
 
 missing=()
 for name in "${cpp_plugins[@]}"; do
@@ -62,8 +65,12 @@ done
 
 for name in "${lua_plugins[@]}"; do
     src_dir="${repo_root}/plugins/${name}/lua"
-    mkdir -p "${dist_dir}/scripts/${name}"
-    cp -R "${src_dir}/." "${dist_dir}/scripts/${name}/"
+    if [[ -f "${src_dir}/main.lua" ]]; then
+        mkdir -p "${dist_dir}/scripts/${name}"
+        cp -R "${src_dir}/." "${dist_dir}/scripts/${name}/"
+    else
+        cp "${src_dir}/${name}.lua" "${dist_dir}/scripts/${name}.lua"
+    fi
 
     if [[ -f "${repo_root}/plugins/${name}/${name}.conf" ]]; then
         mkdir -p "${dist_dir}/script-opts"

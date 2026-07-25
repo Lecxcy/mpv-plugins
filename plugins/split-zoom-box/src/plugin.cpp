@@ -1,0 +1,1008 @@
+#include <mpv/client.h>
+
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <initializer_list>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <fmt/core.h>
+
+#include "shared/cpp/mpv_util.h"
+#include "split_zoom_box/layout.h"
+#include "split_zoom_box/store.h"
+
+namespace {
+
+using namespace split_zoom_box;
+
+constexpr double kRefreshIntervalSeconds = 1.0 / 60.0;
+constexpr double kMinDragPixels = 4.0;
+constexpr double kBorderWidth = 2.0;
+constexpr const char *kColorZoom = "00FF00";
+constexpr const char *kColorReset = "0000FF";
+// 拖拽方向还没落在合法对角线上时展示的中性色，让用户在拖拽过程中就能看出
+// "这个方向不会触发任何动作"。承接自 drag-zoom-box。
+constexpr const char *kColorNeutral = "808080";
+constexpr const char *kColorFocus = "FFC000";
+
+constexpr int kSelectionOverlayId = 0;
+constexpr int kFocusOverlayId = 1;
+constexpr int kOverlayZ = 1000;
+
+constexpr const char *kFilterLabel = "split-zoom-box";
+constexpr double kOsdDuration = 1.6;
+constexpr double kConfirmOsdDuration = 24.0 * 3600.0;
+constexpr std::size_t kContentSampleBytes = 65536;
+// 窗格再小就没有观察价值了，而且过小的 crop/scale 容易让滤镜图配置失败。
+constexpr int kMinPanePixels = 16;
+
+// ---- 基础封装 ----
+
+double node_map_get_number(const mpv_node_list &list, const char *key, double fallback) {
+    for (int i = 0; i < list.num; ++i) {
+        if (std::strcmp(list.keys[i], key) != 0) {
+            continue;
+        }
+        const mpv_node &value = list.values[i];
+        if (value.format == MPV_FORMAT_INT64) {
+            return static_cast<double>(value.u.int64);
+        }
+        if (value.format == MPV_FORMAT_DOUBLE) {
+            return value.u.double_;
+        }
+        break;
+    }
+    return fallback;
+}
+
+// 整个属性读成 MPV_FORMAT_NODE 再取字段，不用 "mouse-pos/x" 这种子属性路径
+// ——enhanced-drag 踩过这个坑：子属性路径在实测环境下会静默返回 0。
+template <typename Fn>
+void with_node_map(mpv_handle *handle, const char *name, Fn &&use) {
+    mpv_node node;
+    if (mpv_get_property(handle, name, MPV_FORMAT_NODE, &node) < 0) {
+        return;
+    }
+    if (node.format == MPV_FORMAT_NODE_MAP) {
+        use(*node.u.list);
+    }
+    mpv_free_node_contents(&node);
+}
+
+int run_command(mpv_handle *h, std::initializer_list<const char *> args) {
+    std::vector<const char *> argv(args);
+    argv.push_back(nullptr);
+    return mpv_command(h, argv.data());
+}
+
+std::string get_string_property(mpv_handle *h, const char *name) {
+    char *value = nullptr;
+    if (mpv_get_property(h, name, MPV_FORMAT_STRING, &value) < 0 || value == nullptr) {
+        return "";
+    }
+    std::string out = value;
+    mpv_free(value);
+    return out;
+}
+
+std::string expand_path(mpv_handle *h, const std::string &path) {
+    const char *args[] = {"expand-path", path.c_str(), nullptr};
+    mpv_node result;
+    if (mpv_command_ret(h, args, &result) < 0) {
+        return "";
+    }
+    std::string out;
+    if (result.format == MPV_FORMAT_STRING && result.u.string) {
+        out = result.u.string;
+    }
+    mpv_free_node_contents(&result);
+    return out;
+}
+
+std::optional<std::string> read_file_text(const std::string &path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::nullopt;
+    }
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+}
+
+bool write_file_text(const std::string &path, const std::string &text) {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        return false;
+    }
+    file << text;
+    return static_cast<bool>(file);
+}
+
+// ---- 几何 ----
+
+struct WindowSize {
+    double w = 0.0;
+    double h = 0.0;
+};
+
+std::optional<WindowSize> read_window_size(mpv_handle *handle) {
+    WindowSize size;
+    with_node_map(handle, "osd-dimensions", [&](const mpv_node_list &list) {
+        size.w = node_map_get_number(list, "w", 0.0);
+        size.h = node_map_get_number(list, "h", 0.0);
+    });
+    if (size.w <= 0.0 || size.h <= 0.0) {
+        return std::nullopt;
+    }
+    return size;
+}
+
+std::optional<Point> read_mouse_pos(mpv_handle *handle) {
+    // 不检查 hover：三个读取时机（按下/拖拽中/松开）必然都有一个鼠标键正
+    // 按着，"hover 为 false 时忽略坐标"这条规则的前提本就不成立。
+    bool found = false;
+    Point pos;
+    with_node_map(handle, "mouse-pos", [&](const mpv_node_list &list) {
+        pos.x = node_map_get_number(list, "x", 0.0);
+        pos.y = node_map_get_number(list, "y", 0.0);
+        found = true;
+    });
+    if (!found) {
+        return std::nullopt;
+    }
+    return pos;
+}
+
+// 当前渲染进窗口的矩形。多窗格生效时这里的"视频"已经是拼接后的画布，
+// 所以同一套换算在两条路径下都成立。
+std::optional<Geometry> read_geometry(mpv_handle *handle) {
+    auto window = read_window_size(handle);
+    if (!window) {
+        return std::nullopt;
+    }
+
+    double ml = 0.0, mr = 0.0, mt = 0.0, mb = 0.0;
+    with_node_map(handle, "osd-dimensions", [&](const mpv_node_list &list) {
+        ml = node_map_get_number(list, "ml", 0.0);
+        mr = node_map_get_number(list, "mr", 0.0);
+        mt = node_map_get_number(list, "mt", 0.0);
+        mb = node_map_get_number(list, "mb", 0.0);
+    });
+
+    double dw = 0.0, dh = 0.0;
+    bool have = false;
+    auto read_display_size = [&](const char *name) {
+        with_node_map(handle, name, [&](const mpv_node_list &list) {
+            double w = node_map_get_number(list, "dw", 0.0);
+            double h = node_map_get_number(list, "dh", 0.0);
+            if (w > 0.0 && h > 0.0) {
+                dw = w;
+                dh = h;
+                have = true;
+            }
+        });
+    };
+    read_display_size("video-target-params");
+    if (!have) {
+        read_display_size("video-out-params");
+    }
+    if (!have) {
+        return std::nullopt;
+    }
+    return compute_geometry(window->w, window->h, ml, mr, mt, mb, dw, dh);
+}
+
+// 源画面的存储尺寸（用于 crop 坐标）和显示尺寸（用作画布尺寸，保证拼接结果
+// 的显示宽高比与原片一致）。
+struct SourceSize {
+    int src_w = 0;
+    int src_h = 0;
+    int canvas_w = 0;
+    int canvas_h = 0;
+};
+
+std::optional<SourceSize> read_source_size(mpv_handle *handle) {
+    SourceSize size;
+    with_node_map(handle, "video-params", [&](const mpv_node_list &list) {
+        size.src_w = static_cast<int>(node_map_get_number(list, "w", 0.0));
+        size.src_h = static_cast<int>(node_map_get_number(list, "h", 0.0));
+        size.canvas_w = static_cast<int>(node_map_get_number(list, "dw", 0.0));
+        size.canvas_h = static_cast<int>(node_map_get_number(list, "dh", 0.0));
+    });
+    if (size.src_w <= 0 || size.src_h <= 0) {
+        return std::nullopt;
+    }
+    if (size.canvas_w <= 0 || size.canvas_h <= 0) {
+        size.canvas_w = size.src_w;
+        size.canvas_h = size.src_h;
+    }
+    return size;
+}
+
+// ---- OSD ----
+
+void set_overlay(mpv_handle *handle, int id, const std::string &format, const std::string &data, int res_x,
+                  int res_y, int z) {
+    std::string id_str = fmt::format("{}", id);
+    std::string res_x_str = fmt::format("{}", res_x);
+    std::string res_y_str = fmt::format("{}", res_y);
+    std::string z_str = fmt::format("{}", z);
+    // osd-overlay 的参数按 mpv 内部定义的位置顺序解析（id/format/data/
+    // res_x/res_y/z/hidden/compute_bounds），不依赖具名参数。
+    const char *args[] = {"osd-overlay",     id_str.c_str(),    format.c_str(), data.c_str(),
+                           res_x_str.c_str(), res_y_str.c_str(), z_str.c_str(),  nullptr};
+    mpv_command(handle, args);
+}
+
+void clear_overlay(mpv_handle *handle, int id) {
+    set_overlay(handle, id, "none", "", 0, 720, 0);
+}
+
+std::string ass_rect(double x1, double y1, double x2, double y2, const char *color) {
+    return fmt::format("{{\\an7\\pos(0,0)\\bord{:.3f}\\shad0\\1a&HFF&\\3a&H00&\\3c&H{}&\\p1}}"
+                       "m {:.3f} {:.3f} l {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}{{\\p0}}",
+                       kBorderWidth, color, x1, y1, x2, y1, x2, y2, x1, y2, x1, y1);
+}
+
+const char *color_for_direction(DragDirection direction) {
+    switch (direction) {
+    case DragDirection::kZoomIn:
+        return kColorZoom;
+    case DragDirection::kReset:
+        return kColorReset;
+    case DragDirection::kNone:
+    default:
+        return kColorNeutral;
+    }
+}
+
+// ---- 插件状态 ----
+
+struct PluginState {
+    mpv_handle *handle = nullptr;
+
+    Layout base = make_layout();
+    std::vector<LayoutSegment> segments;
+
+    // 已经实际下发给 mpv 的状态标识。只有它变化时才重建滤镜/改 zoom，
+    // 否则 time-pos 每帧回调都会触发一次重建。
+    std::string applied_key;
+
+    // 进入多窗格前的 hwdec 设置。真硬件帧下 lavfi 的 crop/scale 会静默失效
+    // （vf add 返回 success、vf 属性仍报告 enabled，只有日志里说被禁用），
+    // 所以多窗格期间强制切成 auto-copy，退出时还原。
+    std::optional<std::string> saved_hwdec;
+
+    std::string current_path;
+    std::string current_path_key;
+    std::string current_content_hash;
+    std::optional<std::string> rename_from;
+    bool awaiting_confirm = false;
+    store::FileEntry pending_entry;
+    bool paused_before_confirm = false;
+
+    std::optional<double> pending_segment_start;
+
+    bool dragging = false;
+    Point drag_start;
+    Point drag_current;
+};
+
+double time_pos(mpv_handle *h) {
+    return mpv_util::get_double(h, "time-pos", 0.0);
+}
+
+// 当前时间点生效的布局：落在某个 enabled 区间内就用它的，否则用 base。
+// 编辑操作也作用在这同一个对象上——"在哪个时间点编辑，就改哪份布局"。
+Layout &active_layout(PluginState &state) {
+    if (auto index = find_segment_at(state.segments, time_pos(state.handle))) {
+        return state.segments[*index].layout;
+    }
+    return state.base;
+}
+
+// ---- 滤镜与缩放的下发 ----
+
+bool has_filter_label(mpv_handle *h, const char *chain, const char *label) {
+    mpv_node node;
+    if (mpv_get_property(h, chain, MPV_FORMAT_NODE, &node) < 0) {
+        return false;
+    }
+    bool found = false;
+    if (node.format == MPV_FORMAT_NODE_ARRAY) {
+        for (int i = 0; i < node.u.list->num && !found; ++i) {
+            const mpv_node &item = node.u.list->values[i];
+            if (item.format != MPV_FORMAT_NODE_MAP) {
+                continue;
+            }
+            const mpv_node_list &map = *item.u.list;
+            for (int j = 0; j < map.num; ++j) {
+                // vf 属性里的 label 不带 "@" 前缀，但命令参数需要带。
+                if (std::strcmp(map.keys[j], "label") == 0 && map.values[j].format == MPV_FORMAT_STRING &&
+                    map.values[j].u.string && std::strcmp(map.values[j].u.string, label) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    mpv_free_node_contents(&node);
+    return found;
+}
+
+void remove_split_filter(PluginState &state) {
+    if (has_filter_label(state.handle, "vf", kFilterLabel)) {
+        run_command(state.handle, {"vf", "remove", (std::string("@") + kFilterLabel).c_str()});
+    }
+}
+
+void reset_zoom_pan(PluginState &state) {
+    mpv_util::set_double(state.handle, "video-zoom", 0.0);
+    mpv_util::set_double(state.handle, "video-pan-x", 0.0);
+    mpv_util::set_double(state.handle, "video-pan-y", 0.0);
+}
+
+// 真硬件帧（hwdec-current 既不是 no 也不以 -copy 结尾）下滤镜会失效，
+// 进入多窗格前必须先切成回拷模式。auto-copy 不是退回软解，解码仍然是硬件
+// 加速的，只是多一步把帧拷回系统内存。
+void ensure_hwdec_for_filter(PluginState &state) {
+    if (state.saved_hwdec) {
+        return;
+    }
+    std::string current = get_string_property(state.handle, "hwdec-current");
+    if (current.empty() || current == "no") {
+        return;
+    }
+    if (current.size() >= 5 && current.compare(current.size() - 5, 5, "-copy") == 0) {
+        return;
+    }
+    state.saved_hwdec = get_string_property(state.handle, "hwdec");
+    mpv_set_property_string(state.handle, "hwdec", "auto-copy");
+    MPV_UTIL_DEBUG("hwdec {} -> auto-copy (滤镜需要软件帧)\n", *state.saved_hwdec);
+}
+
+void restore_hwdec(PluginState &state) {
+    if (!state.saved_hwdec) {
+        return;
+    }
+    mpv_set_property_string(state.handle, "hwdec", state.saved_hwdec->c_str());
+    MPV_UTIL_DEBUG("hwdec 还原为 {}\n", *state.saved_hwdec);
+    state.saved_hwdec.reset();
+}
+
+// 把当前生效的布局下发出去。单窗格走 video-zoom（零拷贝、不碰滤镜链），
+// 多窗格才挂滤镜。
+void apply_layout(PluginState &state, bool force = false) {
+    Layout &layout = active_layout(state);
+    auto size = read_source_size(state.handle);
+    if (!size) {
+        return;
+    }
+
+    int panes = leaf_count(layout);
+    std::string key;
+    std::string graph;
+
+    if (panes <= 1) {
+        const Region &region = layout.nodes.empty() ? Region{} : layout.nodes[leaf_order(layout).front()].region;
+        key = fmt::format("zoom:{:.6f},{:.6f},{:.6f},{:.6f}", region.x1, region.y1, region.x2, region.y2);
+    } else {
+        graph = build_filter_graph(layout, size->src_w, size->src_h, size->canvas_w, size->canvas_h);
+        if (graph.empty()) {
+            return;
+        }
+        key = "graph:" + graph;
+    }
+
+    if (!force && key == state.applied_key) {
+        return;
+    }
+
+    if (panes <= 1) {
+        remove_split_filter(state);
+        restore_hwdec(state);
+
+        std::vector<int> leaves = leaf_order(layout);
+        Region region = leaves.empty() ? Region{} : layout.nodes[leaves.front()].region;
+        if (region_is_full(region)) {
+            reset_zoom_pan(state);
+        } else {
+            auto geometry = read_geometry(state.handle);
+            if (!geometry) {
+                return;
+            }
+            // 换算依赖的是"缩放为 0 时的基准尺寸"，与当前 zoom 无关，
+            // 所以可以从任意缩放状态直接算出目标值，不需要先归零。
+            auto zoom_pan = region_to_zoom_pan(region, geometry->osd_w, geometry->osd_h, geometry->base_w,
+                                                geometry->base_h);
+            if (!zoom_pan) {
+                return;
+            }
+            mpv_util::set_double(state.handle, "video-zoom", zoom_pan->zoom);
+            mpv_util::set_double(state.handle, "video-pan-x", zoom_pan->pan_x);
+            mpv_util::set_double(state.handle, "video-pan-y", zoom_pan->pan_y);
+        }
+    } else {
+        ensure_hwdec_for_filter(state);
+        // 多窗格时整块拼接画面不再额外缩放，否则屏幕坐标反查还要多一层复合。
+        reset_zoom_pan(state);
+
+        std::string spec = fmt::format("@{}:lavfi=[{}]", kFilterLabel, graph);
+        // vf add 用同一个 label 会替换已有滤镜，这是唯一可行的改区域方式：
+        // vf-command 对 lavfi 图里的 crop 实测无效（返回 success 但画面不变）。
+        int rc = run_command(state.handle, {"vf", "add", spec.c_str()});
+        if (rc < 0) {
+            // mpv 在滤镜图非法时会回滚并保留上一版，命令返回值是唯一可靠的
+            // 失败信号；不检查的话内存布局会和实际画面静默不一致。
+            mpv_util::show_osd_message(state.handle, "分屏滤镜应用失败", kOsdDuration);
+            MPV_UTIL_DEBUG("vf add 失败: {}\n", spec);
+            return;
+        }
+    }
+
+    state.applied_key = key;
+}
+
+void clear_all_output(PluginState &state) {
+    remove_split_filter(state);
+    restore_hwdec(state);
+    reset_zoom_pan(state);
+    state.applied_key.clear();
+}
+
+// ---- 焦点提示 ----
+
+void draw_focus_overlay(PluginState &state) {
+    Layout &layout = active_layout(state);
+    if (leaf_count(layout) <= 1) {
+        clear_overlay(state.handle, kFocusOverlayId);
+        return;
+    }
+    auto window = read_window_size(state.handle);
+    auto geometry = read_geometry(state.handle);
+    auto size = read_source_size(state.handle);
+    if (!window || !geometry || !size) {
+        return;
+    }
+
+    std::vector<int> leaves = leaf_order(layout);
+    std::vector<PixelRect> rects = compute_pane_rects(layout, size->canvas_w, size->canvas_h);
+    if (leaves.size() != rects.size()) {
+        return;
+    }
+    auto it = std::find(leaves.begin(), leaves.end(), layout.focused);
+    if (it == leaves.end()) {
+        return;
+    }
+    const PixelRect &rect = rects[static_cast<std::size_t>(it - leaves.begin())];
+
+    // 画布像素 -> 屏幕像素
+    double sx1 = geometry->rect_x + (static_cast<double>(rect.x) / size->canvas_w) * geometry->scaled_w;
+    double sy1 = geometry->rect_y + (static_cast<double>(rect.y) / size->canvas_h) * geometry->scaled_h;
+    double sx2 = geometry->rect_x +
+                 (static_cast<double>(rect.x + rect.w) / size->canvas_w) * geometry->scaled_w;
+    double sy2 = geometry->rect_y +
+                 (static_cast<double>(rect.y + rect.h) / size->canvas_h) * geometry->scaled_h;
+
+    set_overlay(state.handle, kFocusOverlayId, "ass-events", ass_rect(sx1, sy1, sx2, sy2, kColorFocus),
+                static_cast<int>(window->w), static_cast<int>(window->h), kOverlayZ);
+}
+
+void refresh(PluginState &state, bool force = false) {
+    apply_layout(state, force);
+    draw_focus_overlay(state);
+}
+
+// ---- 拖拽框选 ----
+
+void draw_selection(PluginState &state) {
+    auto window = read_window_size(state.handle);
+    if (!window) {
+        clear_overlay(state.handle, kSelectionOverlayId);
+        return;
+    }
+    Box box = normalize_box(state.drag_start, state.drag_current);
+    DragDirection direction = classify_direction(state.drag_current.x - state.drag_start.x,
+                                                  state.drag_current.y - state.drag_start.y, kMinDragPixels);
+    set_overlay(state.handle, kSelectionOverlayId, "ass-events",
+                ass_rect(box.x1, box.y1, box.x2, box.y2, color_for_direction(direction)),
+                static_cast<int>(window->w), static_cast<int>(window->h), kOverlayZ);
+}
+
+// 把屏幕框选换算成"某个窗格的新源区域"。
+// 单窗格时显示的就是源画面，换算结果直接就是源坐标；多窗格时显示的是拼接
+// 画布，必须先命中窗格、再经窗格自身的区域映射回源坐标——少了这一层，第二次
+// 调整某个窗格就会取到错的区域。
+bool apply_drag_selection(PluginState &state, const Box &box, bool reset) {
+    Layout &layout = active_layout(state);
+    auto geometry = read_geometry(state.handle);
+    if (!geometry) {
+        mpv_util::show_osd_message(state.handle, "视频几何信息不可用", kOsdDuration);
+        return false;
+    }
+
+    if (leaf_count(layout) <= 1) {
+        if (reset) {
+            return set_focused_region(layout, Region{});
+        }
+        auto region = box_to_region(*geometry, box);
+        if (!region) {
+            return false;
+        }
+        return set_focused_region(layout, *region);
+    }
+
+    auto size = read_source_size(state.handle);
+    if (!size) {
+        return false;
+    }
+    auto canvas_box = box_to_region(*geometry, box);
+    if (!canvas_box) {
+        return false;
+    }
+
+    // 用起点定位窗格：拖拽可能跨出窗格边界，一律按起点所在的窗格处理。
+    Box start_box = normalize_box(state.drag_start, state.drag_start);
+    auto start_norm = box_to_region(*geometry, Box{start_box.x1, start_box.y1, start_box.x1 + 1.0,
+                                                    start_box.y1 + 1.0});
+    if (!start_norm) {
+        return false;
+    }
+    auto hit = hit_test(layout, size->canvas_w, size->canvas_h, start_norm->x1, start_norm->y1);
+    if (!hit) {
+        return false;
+    }
+
+    layout.focused = hit->leaf;
+    if (reset) {
+        return set_focused_region(layout, Region{});
+    }
+
+    std::vector<int> leaves = leaf_order(layout);
+    std::vector<PixelRect> rects = compute_pane_rects(layout, size->canvas_w, size->canvas_h);
+    auto it = std::find(leaves.begin(), leaves.end(), hit->leaf);
+    if (it == leaves.end() || leaves.size() != rects.size()) {
+        return false;
+    }
+    const PixelRect &rect = rects[static_cast<std::size_t>(it - leaves.begin())];
+    if (rect.w <= 0 || rect.h <= 0) {
+        return false;
+    }
+
+    auto to_pane_u = [&](double canvas_u) {
+        return std::clamp((canvas_u * size->canvas_w - rect.x) / rect.w, 0.0, 1.0);
+    };
+    auto to_pane_v = [&](double canvas_v) {
+        return std::clamp((canvas_v * size->canvas_h - rect.y) / rect.h, 0.0, 1.0);
+    };
+
+    double u1 = to_pane_u(canvas_box->x1);
+    double u2 = to_pane_u(canvas_box->x2);
+    double v1 = to_pane_v(canvas_box->y1);
+    double v2 = to_pane_v(canvas_box->y2);
+    if (u2 - u1 <= 0.0 || v2 - v1 <= 0.0) {
+        return false;
+    }
+
+    Region pane_region = layout.nodes[hit->leaf].region;
+    return set_focused_region(layout, subregion(pane_region, u1, v1, u2, v2));
+}
+
+void drag_begin(PluginState &state) {
+    auto pos = read_mouse_pos(state.handle);
+    if (!pos) {
+        return;
+    }
+    state.dragging = true;
+    state.drag_start = *pos;
+    state.drag_current = *pos;
+    draw_selection(state);
+}
+
+void drag_update(PluginState &state) {
+    if (!state.dragging) {
+        return;
+    }
+    if (auto pos = read_mouse_pos(state.handle)) {
+        state.drag_current = *pos;
+    }
+    draw_selection(state);
+}
+
+void drag_finish(PluginState &state) {
+    if (!state.dragging) {
+        return;
+    }
+    if (auto pos = read_mouse_pos(state.handle)) {
+        state.drag_current = *pos;
+    }
+    state.dragging = false;
+    clear_overlay(state.handle, kSelectionOverlayId);
+
+    Box box = normalize_box(state.drag_start, state.drag_current);
+    DragDirection direction = classify_direction(state.drag_current.x - state.drag_start.x,
+                                                  state.drag_current.y - state.drag_start.y, kMinDragPixels);
+    if (direction == DragDirection::kNone) {
+        return;
+    }
+    if (apply_drag_selection(state, box, direction == DragDirection::kReset)) {
+        refresh(state);
+    }
+}
+
+// ---- 按键动作 ----
+
+void on_split(PluginState &state, SplitDir dir) {
+    auto size = read_source_size(state.handle);
+    if (!size) {
+        return;
+    }
+    Layout &layout = active_layout(state);
+    Layout backup = layout;
+
+    if (!split_focused(layout, dir)) {
+        return;
+    }
+    // 分屏后窗格太小就撤销：过小的 crop/scale 容易让整张滤镜图配置失败。
+    std::vector<PixelRect> rects = compute_pane_rects(layout, size->canvas_w, size->canvas_h);
+    for (const PixelRect &rect : rects) {
+        if (rect.w < kMinPanePixels || rect.h < kMinPanePixels) {
+            layout = backup;
+            mpv_util::show_osd_message(state.handle, "窗格太小，无法继续分屏", kOsdDuration);
+            return;
+        }
+    }
+    refresh(state);
+    mpv_util::show_osd_message(state.handle, fmt::format("分屏：{} 个窗格", leaf_count(layout)), kOsdDuration);
+}
+
+void on_close_pane(PluginState &state) {
+    Layout &layout = active_layout(state);
+    if (!close_focused(layout)) {
+        // 只剩一个窗格：整体退出分屏（恢复完整画面）
+        set_focused_region(layout, Region{});
+        refresh(state);
+        mpv_util::show_osd_message(state.handle, "已恢复完整画面", kOsdDuration);
+        return;
+    }
+    refresh(state);
+    mpv_util::show_osd_message(state.handle, fmt::format("关闭窗格：剩 {} 个", leaf_count(layout)), kOsdDuration);
+}
+
+void on_focus_next(PluginState &state) {
+    Layout &layout = active_layout(state);
+    if (leaf_count(layout) <= 1) {
+        return;
+    }
+    focus_next(layout);
+    draw_focus_overlay(state);
+
+    std::vector<int> leaves = leaf_order(layout);
+    auto it = std::find(leaves.begin(), leaves.end(), layout.focused);
+    std::size_t index = (it == leaves.end()) ? 0 : static_cast<std::size_t>(it - leaves.begin());
+    mpv_util::show_osd_message(state.handle, fmt::format("窗格 {}/{}", index + 1, leaves.size()), kOsdDuration);
+}
+
+void on_segment_start(PluginState &state) {
+    state.pending_segment_start = time_pos(state.handle);
+    mpv_util::show_osd_message(state.handle, fmt::format("分屏段起点 {:.2f}s", *state.pending_segment_start),
+                               kOsdDuration);
+}
+
+void on_segment_end(PluginState &state) {
+    if (!state.pending_segment_start) {
+        mpv_util::show_osd_message(state.handle, "请先设定分屏段起点", kOsdDuration);
+        return;
+    }
+    double a = *state.pending_segment_start;
+    double b = time_pos(state.handle);
+    if (b < a) {
+        std::swap(a, b);
+    }
+    if (b - a <= 0.0) {
+        mpv_util::show_osd_message(state.handle, "分屏段长度为零，已忽略", kOsdDuration);
+        return;
+    }
+    if (overlapping_segment(state.segments, a, b)) {
+        mpv_util::show_osd_message(state.handle, "与已有分屏段重叠，已拒绝", kOsdDuration);
+        return;
+    }
+
+    // 把"当前正在编辑的这份布局"快照进新区间；区间外恢复正常画面，所以
+    // base 同时被重置回完整画面。
+    LayoutSegment segment;
+    segment.a = a;
+    segment.b = b;
+    segment.enabled = true;
+    segment.layout = active_layout(state);
+    state.segments.push_back(segment);
+    sort_segments(state.segments);
+    state.pending_segment_start.reset();
+    state.base = make_layout();
+
+    refresh(state, true);
+    mpv_util::show_osd_message(state.handle, fmt::format("分屏段 {:.2f}s - {:.2f}s（共 {} 段）", a, b,
+                                                          state.segments.size()),
+                               kOsdDuration);
+}
+
+void on_segment_clear(PluginState &state) {
+    double pos = time_pos(state.handle);
+    if (auto index = find_segment_at(state.segments, pos)) {
+        state.segments.erase(state.segments.begin() + static_cast<std::ptrdiff_t>(*index));
+        refresh(state, true);
+        mpv_util::show_osd_message(state.handle, fmt::format("已删除分屏段（剩 {} 段）", state.segments.size()),
+                                   kOsdDuration);
+        return;
+    }
+    mpv_util::show_osd_message(state.handle, "当前位置没有分屏段", kOsdDuration);
+}
+
+// ---- 存档 ----
+
+struct ContentSample {
+    std::uint64_t size = 0;
+    std::string head;
+    std::string tail;
+};
+
+std::optional<ContentSample> read_content_sample(const std::string &path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return std::nullopt;
+    }
+    file.seekg(0, std::ios::end);
+    std::streamoff size = file.tellg();
+    if (size < 0) {
+        return std::nullopt;
+    }
+
+    ContentSample sample;
+    sample.size = static_cast<std::uint64_t>(size);
+    store::SampleRanges ranges = store::compute_sample_ranges(sample.size, kContentSampleBytes);
+
+    sample.head.resize(ranges.head_len);
+    file.seekg(0, std::ios::beg);
+    file.read(sample.head.data(), static_cast<std::streamsize>(ranges.head_len));
+
+    sample.tail.resize(ranges.tail_len);
+    file.seekg(static_cast<std::streamoff>(ranges.tail_offset), std::ios::beg);
+    file.read(sample.tail.data(), static_cast<std::streamsize>(ranges.tail_len));
+    return sample;
+}
+
+std::string archive_path_for_hash(mpv_handle *h, const std::string &hash) {
+    // 用 ~~home/ 而不是 ~~/：后者语义是"子路径已存在时返回已存在的那个
+    // 目录"，是给读取用的；这里要写入，需要明确指向 mpv 配置目录。
+    std::string dir = expand_path(h, "~~home/split-layouts");
+    // mpv 没有配置目录时（例如 --no-config）"~~home/" 会展开成空串，只剩下
+    // 相对路径 "split-layouts"，直接用会把存档写进 mpv 当前的工作目录这种
+    // 完全意料之外的位置。这里要求必须是绝对路径，否则宁可不存。
+    if (dir.empty() || !std::filesystem::path(dir).is_absolute()) {
+        MPV_UTIL_DEBUG("archive_path_for_hash: 展开结果不是绝对路径: '{}'\n", dir);
+        return "";
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+        return "";
+    }
+    return dir + "/" + hash + ".json";
+}
+
+void apply_entry(PluginState &state, store::FileEntry entry) {
+    sort_segments(entry.segments);
+    state.base = entry.base;
+    state.segments = std::move(entry.segments);
+    state.pending_segment_start.reset();
+    refresh(state, true);
+}
+
+void on_save(PluginState &state) {
+    if (state.current_content_hash.empty() || state.current_path_key.empty()) {
+        mpv_util::show_osd_message(state.handle, "当前文件无法定位，未保存", kOsdDuration);
+        return;
+    }
+    std::string path = archive_path_for_hash(state.handle, state.current_content_hash);
+    if (path.empty()) {
+        mpv_util::show_osd_message(state.handle, "无法确定存档路径", kOsdDuration);
+        return;
+    }
+
+    store::Archive archive;
+    if (auto text = read_file_text(path)) {
+        archive = store::deserialize_archive(*text);
+    }
+
+    store::FileEntry entry;
+    entry.base = state.base;
+    entry.segments = state.segments;
+    store::upsert(archive, state.current_path_key, entry, state.rename_from);
+    state.rename_from.reset();
+
+    if (write_file_text(path, store::serialize_archive(archive))) {
+        mpv_util::show_osd_message(state.handle, fmt::format("已保存（{} 段）", state.segments.size()),
+                                   kOsdDuration);
+    } else {
+        mpv_util::show_osd_message(state.handle, "保存失败", kOsdDuration);
+    }
+}
+
+void on_load(PluginState &state) {
+    if (state.current_content_hash.empty()) {
+        return;
+    }
+    std::string path = archive_path_for_hash(state.handle, state.current_content_hash);
+    auto text = path.empty() ? std::nullopt : read_file_text(path);
+    if (!text) {
+        mpv_util::show_osd_message(state.handle, "没有找到存档", kOsdDuration);
+        return;
+    }
+
+    store::Archive archive = store::deserialize_archive(*text);
+    store::LookupResult result = store::lookup(archive, state.current_path_key);
+    switch (result.kind) {
+    case store::LookupResult::Kind::kExactMatch:
+        apply_entry(state, result.entry);
+        mpv_util::show_osd_message(state.handle, fmt::format("已读取（{} 段）", state.segments.size()),
+                                   kOsdDuration);
+        break;
+    case store::LookupResult::Kind::kSingleCandidate:
+        // 提示文案不带明文路径——插件这边也只有它的哈希。
+        state.awaiting_confirm = true;
+        state.pending_entry = result.entry;
+        state.rename_from = result.matched_key;
+        state.paused_before_confirm = mpv_util::get_flag(state.handle, "pause", false);
+        mpv_util::set_flag(state.handle, "pause", true);
+        mpv_util::show_osd_message(state.handle,
+                                   "存档里只有一条记录，文件名对不上（可能改过名）。\\N"
+                                   "Alt+y 使用它，Alt+n 放弃",
+                                   kConfirmOsdDuration);
+        break;
+    case store::LookupResult::Kind::kNoArchive:
+        mpv_util::show_osd_message(state.handle, "没有找到匹配的存档", kOsdDuration);
+        break;
+    }
+}
+
+void on_confirm(PluginState &state, bool yes) {
+    if (!state.awaiting_confirm) {
+        return;
+    }
+    state.awaiting_confirm = false;
+    mpv_util::set_flag(state.handle, "pause", state.paused_before_confirm);
+    mpv_util::show_osd_message(state.handle, "", 1);
+
+    if (yes) {
+        apply_entry(state, state.pending_entry);
+        mpv_util::show_osd_message(state.handle, fmt::format("已读取（{} 段）", state.segments.size()),
+                                   kOsdDuration);
+    } else {
+        state.rename_from.reset();
+        mpv_util::show_osd_message(state.handle, "已放弃读取", kOsdDuration);
+    }
+    state.pending_entry = store::FileEntry{};
+}
+
+// ---- 事件 ----
+
+void on_file_loaded(PluginState &state) {
+    state.current_path = get_string_property(state.handle, "path");
+    state.current_path_key =
+        state.current_path.empty() ? "" : store::compute_path_hash(store::extract_filename(state.current_path));
+    state.current_content_hash.clear();
+    if (!state.current_path.empty()) {
+        if (auto sample = read_content_sample(state.current_path)) {
+            state.current_content_hash = store::compute_content_hash(sample->size, sample->head, sample->tail);
+        }
+    }
+
+    state.base = make_layout();
+    state.segments.clear();
+    state.pending_segment_start.reset();
+    state.rename_from.reset();
+    state.awaiting_confirm = false;
+    state.applied_key.clear();
+    state.saved_hwdec.reset();
+}
+
+void handle_client_message(PluginState &state, mpv_event_client_message *message) {
+    if (message->num_args < 3 || std::strcmp(message->args[0], "key-binding") != 0) {
+        return;
+    }
+    std::string binding = message->args[1];
+    char phase = message->args[2][0];
+
+    // 拖拽需要按下/松开两个边沿，其余按键只在按下（或无法区分时的单次触发）
+    // 时响应。
+    if (binding == "drag-select") {
+        if (phase == 'd') {
+            drag_begin(state);
+        } else if (phase == 'u') {
+            drag_finish(state);
+        }
+        return;
+    }
+
+    if (phase != 'd' && phase != 'p') {
+        return;
+    }
+
+    if (binding == "split-h") {
+        on_split(state, SplitDir::kHorizontal);
+    } else if (binding == "split-v") {
+        on_split(state, SplitDir::kVertical);
+    } else if (binding == "close-pane") {
+        on_close_pane(state);
+    } else if (binding == "focus-next") {
+        on_focus_next(state);
+    } else if (binding == "segment-start") {
+        on_segment_start(state);
+    } else if (binding == "segment-end") {
+        on_segment_end(state);
+    } else if (binding == "segment-clear") {
+        on_segment_clear(state);
+    } else if (binding == "save-layouts") {
+        on_save(state);
+    } else if (binding == "load-layouts") {
+        on_load(state);
+    } else if (binding == "confirm-yes") {
+        on_confirm(state, true);
+    } else if (binding == "confirm-no") {
+        on_confirm(state, false);
+    }
+}
+
+} // namespace
+
+extern "C" int mpv_open_cplugin(mpv_handle *handle) {
+    PluginState state;
+    state.handle = handle;
+
+    // time-pos 用来在时间段之间切换布局；apply_layout 里的 applied_key 去重
+    // 保证每帧回调不会真的触发重建。
+    mpv_observe_property(handle, 0, "time-pos", MPV_FORMAT_DOUBLE);
+    // 窗口尺寸变化时焦点框要跟着重画。
+    mpv_observe_property(handle, 0, "osd-dimensions", MPV_FORMAT_NODE);
+
+    while (true) {
+        double timeout = state.dragging ? kRefreshIntervalSeconds : -1.0;
+        mpv_event *event = mpv_wait_event(handle, timeout);
+
+        switch (event->event_id) {
+        case MPV_EVENT_SHUTDOWN:
+            clear_overlay(handle, kSelectionOverlayId);
+            clear_overlay(handle, kFocusOverlayId);
+            return 0;
+        case MPV_EVENT_CLIENT_MESSAGE:
+            handle_client_message(state, static_cast<mpv_event_client_message *>(event->data));
+            break;
+        case MPV_EVENT_FILE_LOADED:
+            on_file_loaded(state);
+            break;
+        case MPV_EVENT_END_FILE:
+            clear_all_output(state);
+            clear_overlay(handle, kSelectionOverlayId);
+            clear_overlay(handle, kFocusOverlayId);
+            break;
+        case MPV_EVENT_PROPERTY_CHANGE: {
+            auto *prop = static_cast<mpv_event_property *>(event->data);
+            if (prop && std::strcmp(prop->name, "time-pos") == 0) {
+                apply_layout(state);
+            } else if (prop && std::strcmp(prop->name, "osd-dimensions") == 0) {
+                draw_focus_overlay(state);
+            }
+            break;
+        }
+        case MPV_EVENT_NONE:
+            drag_update(state);
+            break;
+        default:
+            break;
+        }
+    }
+}

@@ -1,9 +1,9 @@
-#include "drag_zoom_box/logic.h"
+#include "split_zoom_box/geometry.h"
 
 #include <algorithm>
 #include <cmath>
 
-namespace drag_zoom_box {
+namespace split_zoom_box {
 
 namespace {
 
@@ -38,6 +38,17 @@ DragDirection classify_direction(double dx, double dy, double min_drag_pixels) {
     return DragDirection::kNone;
 }
 
+bool region_valid(const Region &region) {
+    return region.x1 >= -kRegionEpsilon && region.y1 >= -kRegionEpsilon && region.x2 <= 1.0 + kRegionEpsilon &&
+           region.y2 <= 1.0 + kRegionEpsilon && region.width() > kRegionEpsilon &&
+           region.height() > kRegionEpsilon;
+}
+
+bool region_is_full(const Region &region) {
+    return region.x1 <= kRegionEpsilon && region.y1 <= kRegionEpsilon && region.x2 >= 1.0 - kRegionEpsilon &&
+           region.y2 >= 1.0 - kRegionEpsilon;
+}
+
 std::optional<Geometry> compute_geometry(double osd_w, double osd_h, double margin_left, double margin_right,
                                           double margin_top, double margin_bottom, double dw, double dh) {
     if (osd_w <= 0.0 || osd_h <= 0.0 || dw <= 0.0 || dh <= 0.0) {
@@ -64,36 +75,46 @@ std::optional<Geometry> compute_geometry(double osd_w, double osd_h, double marg
     return geometry;
 }
 
-std::optional<ZoomResult> compute_zoom(const Geometry &geometry, const Box &box) {
-    double u1 = clamp01((box.x1 - geometry.rect_x) / geometry.scaled_w);
-    double v1 = clamp01((box.y1 - geometry.rect_y) / geometry.scaled_h);
-    double u2 = clamp01((box.x2 - geometry.rect_x) / geometry.scaled_w);
-    double v2 = clamp01((box.y2 - geometry.rect_y) / geometry.scaled_h);
+std::optional<Region> box_to_region(const Geometry &geometry, const Box &box) {
+    if (geometry.scaled_w <= 0.0 || geometry.scaled_h <= 0.0) {
+        return std::nullopt;
+    }
 
-    double du = u2 - u1;
-    double dv = v2 - v1;
+    Region region;
+    region.x1 = clamp01((box.x1 - geometry.rect_x) / geometry.scaled_w);
+    region.y1 = clamp01((box.y1 - geometry.rect_y) / geometry.scaled_h);
+    region.x2 = clamp01((box.x2 - geometry.rect_x) / geometry.scaled_w);
+    region.y2 = clamp01((box.y2 - geometry.rect_y) / geometry.scaled_h);
+
+    if (region.width() <= 0.0 || region.height() <= 0.0) {
+        return std::nullopt;
+    }
+    return region;
+}
+
+std::optional<ZoomPan> region_to_zoom_pan(const Region &region, double osd_w, double osd_h, double base_w,
+                                           double base_h) {
+    if (osd_w <= 0.0 || osd_h <= 0.0 || base_w <= 0.0 || base_h <= 0.0) {
+        return std::nullopt;
+    }
+    double du = region.width();
+    double dv = region.height();
     if (du <= 0.0 || dv <= 0.0) {
         return std::nullopt;
     }
 
-    double scale_x = geometry.osd_w / (du * geometry.base_w);
-    double scale_y = geometry.osd_h / (dv * geometry.base_h);
+    double scale_x = osd_w / (du * base_w);
+    double scale_y = osd_h / (dv * base_h);
     double scale = std::min(scale_x, scale_y);
     if (!(scale > 0.0)) {
         return std::nullopt;
     }
 
-    ZoomResult result;
+    ZoomPan result;
     result.zoom = log2_value(scale);
-    result.pan_x = 0.5 - (u1 + u2) / 2.0;
-    result.pan_y = 0.5 - (v1 + v2) / 2.0;
-    result.u1 = u1;
-    result.v1 = v1;
-    result.u2 = u2;
-    result.v2 = v2;
-    result.scale_x = scale_x;
-    result.scale_y = scale_y;
+    result.pan_x = 0.5 - (region.x1 + region.x2) / 2.0;
+    result.pan_y = 0.5 - (region.y1 + region.y2) / 2.0;
     return result;
 }
 
-} // namespace drag_zoom_box
+} // namespace split_zoom_box

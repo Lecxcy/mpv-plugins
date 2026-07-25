@@ -1,6 +1,6 @@
 # split-zoom-box 手动测试指南
 
-自动化部分（33 个单测用例 + 两套 IPC 端到端）已经跑过，覆盖范围见
+自动化部分（34 个单测用例 + 两套 IPC 端到端）已经跑过，覆盖范围见
 [README.md](README.md) "验证"一节。**本文只列自动化测不了、或者测了也不算数的
 部分**：真实鼠标拖拽、窗格命中是否准、焦点框位置、观感是否流畅。
 
@@ -67,7 +67,7 @@ cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug && cmake --build build-debug
 
 把 `build-debug/plugins/split-zoom-box/split-zoom-box.so` 换进 `dist/`，
 再加 `-v --log-file=x.log` 跑。`plugin.cpp` 里 `MPV_UTIL_DEBUG` 包着的输出
-（hwdec 切换、`vf add` 失败的完整 spec、存档路径展开结果）只在 Debug 下生效。
+（`vf add` 失败的完整 spec、存档路径展开结果）只在 Debug 下生效。
 
 **看日志时重点盯 `Disabling filter split-zoom-box`**——这行是 §6.4 那个坑的
 唯一信号，属性层面查不出来。正常情况下它一次都不该出现。
@@ -132,10 +132,11 @@ C7 做完的画面应该是：四个窗格各显示原画的一个象限，等�
 | D3 | 连续分屏到窗格很小 | 到某一步弹出"窗格太小，无法继续分屏"并**保持上一步的布局**，不会画面错乱 |
 | D4 | D2 布局下播放 | 各格仍然同步 |
 
-## E. 硬解自动管理【回归 §6.4】
+## E. 硬解【回归 §6.4 / §6.7】
 
-**这条是最隐蔽的坑**：真硬件帧下滤镜会被禁用，但 `vf` 属性仍报告
-`enabled: true`，只有日志能看出来。
+**这一组最重要**，因为这里踩过两个坑：滤镜在真硬件帧下会被静默禁用（属性层面
+查不出来，只有日志有），以及早期"自动切 hwdec"的修法会把 VideoToolbox 解码器
+打坏——**暂停下完全正常，播放中反复开关才暴露**。
 
 ```sh
 mpv --config-dir="$(pwd)/dist" --hwdec=videotoolbox grid.mp4   # macOS
@@ -143,14 +144,18 @@ mpv --config-dir="$(pwd)/dist" --hwdec=videotoolbox grid.mp4   # macOS
 
 | # | 操作 | 期望 |
 |---|---|---|
-| E1 | 启动后不分屏，`Alt+h` 前先看 `hwdec-current` | 是 `videotoolbox`（真硬件帧） |
-| E2 | 按 `Alt+h` 分屏 | **画面真的变成两格**（不是看起来没反应）；`hwdec-current` 变成 `videotoolbox-copy` |
-| E3 | 一路按 `Alt+w` 退出分屏 | `hwdec-current` 变回 `videotoolbox` |
-| E4 | 全程看日志 | **`Disabling filter` 一次都不出现** |
-| E5 | 分屏状态下播放一段 | 不卡顿、不掉帧（回拷开销可接受）；4K 素材下如果明显卡，记下来 |
+| E1 | 启动后先看 `hwdec-current`（按 `i`） | `videotoolbox`（真硬件帧） |
+| E2 | 按 `Alt+h` 分屏 | **画面真的变成两格**（不是看起来没反应） |
+| E3 | 再看 `hwdec-current` | **仍然是 `videotoolbox`** ——插件不该改动你的 hwdec 设置 |
+| E4 | 按 `Alt+w` 退出分屏 | 画面恢复，`hwdec-current` 依旧不变 |
+| E5 | **播放状态下**反复按 `Alt+h` / `Alt+w`，快速连按十几次 | 画面始终跟得上，**不出现花屏、黑屏或卡死** |
+| E6 | E5 全程看日志 | **`Disabling filter`、`failed to decode picture`、`-12909` 一次都不出现** |
+| E7 | 分屏状态下播放一段 | 不卡顿、不掉帧；4K 素材下如果明显卡，记下来 |
+| E8 | 分屏状态下手动切 hwdec（`i` 面板旁用 IPC 或改配置重开） | 滤镜自动按新帧类型重建，画面不坏 |
 
-查 `hwdec-current` 最方便的办法是按 `i` 打开 stats 面板，或另开一个终端用
-`--input-ipc-server` 查询。
+**E5/E6 是 §6.7 那个 bug 的直接回归**：修复前在播放中快速开关会稳定复现
+`-12909` 连环解码失败。用 `--vo=null` 或暂停状态测**测不出来**，必须真窗口 +
+播放中 + 高频操作。
 
 **E2 如果画面没变但也没报错，就是踩到 §6.4 了**，务必反馈。
 
@@ -202,7 +207,7 @@ mpv --config-dir="$(pwd)/dist" --hwdec=videotoolbox grid.mp4   # macOS
 | # | 操作 | 期望 |
 |---|---|---|
 | I1 | 纯音频文件下按 `Alt+h` | 不崩溃，不报错刷屏 |
-| I2 | 分屏状态下切换到下一个文件 | 滤镜被清掉、hwdec 还原、新文件从完整画面开始 |
+| I2 | 分屏状态下切换到下一个文件 | 滤镜被清掉、新文件从完整画面开始 |
 | I3 | 分屏状态下 seek 到文件末尾/开头 | 不崩、布局保持 |
 | I4 | 分屏状态下退出 mpv | 正常退出，不卡死 |
 | I5 | 分屏状态下反复快速按 `Alt+h`/`Alt+w` | 不崩，最终状态与按键序列一致 |
@@ -220,8 +225,9 @@ mpv --config-dir="$(pwd)/dist" --hwdec=videotoolbox grid.mp4   # macOS
 
 ## 已知限制（测到这些不用报）
 
-- **多窗格期间 hwdec 被切成 `auto-copy`**：这是刻意的，不是 bug。4K 高码率下
-  如果开销明显，属于"已知取舍"，但**具体卡到什么程度值得反馈**。
+- **多窗格期间帧要经 `hwdownload` 回拷到系统内存**：这是刻意的，不是 bug；
+  解码本身仍是硬件加速，插件不会改你的 `hwdec` 设置。4K 高码率下如果开销
+  明显，属于"已知取舍"，但**具体卡到什么程度值得反馈**。
 - **每次改窗格区域会有一次极短的重配**：滤镜链必须重建，`vf-command` 对
   lavfi 里的 `crop` 实测无效（SPEC §6.2）。拖拽过程中只画预览框、松手才重建。
 - **窗格画质受源分辨率限制**：显示的是缩放后的源区域，放大倍数高了会糊。

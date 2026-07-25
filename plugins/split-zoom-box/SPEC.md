@@ -23,7 +23,8 @@
 这是本插件的核心决定。分屏必须用 lavfi 滤镜，但滤镜对"只放大一个区域"这个
 退化情况是全方位的降级：
 
-- **硬解**：真硬件帧下滤镜直接失效（§6.4），必须回拷；`video-zoom` 不受影响。
+- **硬解**：真硬件帧下滤镜直接失效（§6.4），需要在图头部加 `hwdownload`（§6.7）；
+  `video-zoom` 完全不受影响。
 - **画质**：`video-zoom` 是 vo 层操作，GPU 一次采样到窗口分辨率；滤镜路径是
   `crop`→swscale 放大到画布→vo 再缩放，两次重采样且第一次在 CPU 上逐帧做。
 - **响应**：`video-zoom` 逐帧可改；滤镜每次改区域都要重建整条链（§6.3）。
@@ -142,11 +143,8 @@ Impossible to convert between the formats supported by the filter 'Parsed_crop_1
 Disabling filter split-zoom-box because it has failed.
 ```
 但 `vf add` 返回 `success`，且 `vf` 属性里该滤镜**仍然报告 `enabled: true`**。
-在图头部加 `hwdownload,format=nv12` 实测也失败（`Failed to configure output pad`）。
-**修复**：进入多窗格前读 `hwdec-current`，是非 `-copy` 的硬件模式就保存原
-`hwdec` 值并切成 `auto-copy`，退出时还原。实测切换干净、播放不中断，且
-`Disabling filter` 出现 0 次。
 **教训**：这是最隐蔽的一条——属性层面完全看不出问题，只有日志和像素能发现。
+修复方式见 §6.7（第一版的修法是错的，不要照抄）。
 
 ### 6.5 堆叠轴上尺寸差 1 像素，整张图配置失败
 
@@ -171,9 +169,66 @@ Disabling filter split-zoom-box because it has failed.
 `enhanced-ab-loop` 里也存在（那边同样直接用 `expand_path` 的结果拼路径），
 本轮没有改动那个插件，但值得后续一并加固。
 
+### 6.7 切 hwdec 属性会打坏解码器——正确解法是根本不碰它
+
+**现象**（用户真机反馈）：暂停时开关窗格都正常，**播放中**关窗格会连环报错，
+mpv 进程还活着但画面废了：
+```
+Using hardware decoding (videotoolbox).          <- 插件还原了 hwdec
+h264: vt decoder cb: output image buffer is null: -12909, reconfig 1
+h264: hardware accelerator failed to decode picture      (连续多次)
+Impossible to convert ... 'Parsed_crop_1' ...    <- 滤镜还在链上，却来了硬件帧
+Disabling filter split-zoom-box because it has failed.
+```
+
+**根因**：§6.4 的第一版修法是"进入多窗格时把 `hwdec` 切成 `auto-copy`、退出时
+还原"。问题在于**改 `hwdec` 属性会重建整个解码器**：
+
+- 播放中反复重建会把 VideoToolbox 会话打坏，出现 `-12909`
+  （`output image buffer is null`）的连环解码失败；
+- 解码器重建和滤镜移除是两个独立的异步过程，还原 hwdec 与摘掉滤镜之间存在
+  竞态窗口，硬件帧会灌进只吃软件帧的 `crop`。
+
+暂停时不复现，是因为没有帧在流动，两个过程不会交叠。
+
+**复现**：播放中以 ≤0.2s 的间隔反复 split/close，稳定出现
+`failed to decode picture`（实测 6 次）。
+
+**修复**：**完全不碰 `hwdec`**，改成根据当前帧类型决定滤镜图的形状。实测真值表：
+
+| 帧类型 | 无前缀 | `hwdownload,format=nv12\|p010le,` 前缀 |
+|---|---|---|
+| 硬件帧（`videotoolbox`） | 失败 | **成功** |
+| 软件帧（`no` / `*-copy`） | **成功** | 失败 |
+
+没有一份图能同时兼容两种情况，所以在生成图时读一次 `hwdec-current` 来决定；
+帧类型进 `applied_key`，并 observe `hwdec-current`，用户自己切 hwdec 或 mpv
+自动回退时会自然重建。
+
+修复后同样的压测（40 次快速开关）：`failed to decode picture` **0 次**，
+`Disabling filter` **0 次**，解码器全程只初始化 1 次，`hwdec-current` 始终保持
+`videotoolbox`。
+
+**教训**：两条。一是**不要为了迁就自己的滤镜去改播放器的全局解码设置**——
+代价是重建解码器这种重量级副作用，还引入了本来不存在的竞态；应该让自己的
+滤镜去适配当前环境。二是**"暂停下测试通过"不等于通过**，这一类涉及解码/
+滤镜管线的改动必须在播放状态下、并且用高频操作压过才算数。
+
+### 6.8 早期 `hwdownload` 测试的假阴性
+
+§6.4 记过一句"在图头部加 `hwdownload,format=nv12` 实测也失败"，**那是错的**。
+当时的测试是在同一个 mpv 会话里、前一步已经把 hwdec 切走之后跑的，实际输入
+已经是软件帧——而 `hwdownload` 在软件帧上本来就会失败（见 §6.7 真值表）。
+在干净会话里、确认 `hwdec-current` 确实是 `videotoolbox` 时重测，前缀是好用的。
+
+**教训**：验证平台行为时，每个用例都要在**确认过的初始状态**下跑；在一个
+会话里连着测多个变体，前面的用例会污染后面的前提。一条"我试过，不行"的结论
+如果建立在被污染的环境上，会把正确的方案排除掉——这次差点就是。
+
 ## 7. 已知限制（不是 bug）
 
-- 多窗格期间强制 `auto-copy`，4K 高码率下帧回拷可能有开销。理论上更优的是用
+- 多窗格期间帧要经 `hwdownload` 回拷到系统内存，4K 高码率下可能有开销。
+  注意解码本身仍是硬件加速，且插件不会改动 `hwdec` 设置。理论上更优的是用
   `vo=gpu` 的用户着色器在 GPU 上合成（零拷贝、改区域即时生效，`PARAM` 块支持
   运行时可调参数），但 mpv 明确声明着色器语法不稳定、只能在 `gpu`/`gpu-next`
   下用，且无法在无窗口环境里自动化验证，本轮没有采用。

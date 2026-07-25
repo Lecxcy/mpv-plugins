@@ -114,6 +114,25 @@ TEST_CASE("2x2 网格的滤镜图结构正确", "[layout][graph]") {
     REQUIRE(graph.back() != ';');
 }
 
+TEST_CASE("硬件帧下图头部加 hwdownload，软件帧下不能加", "[layout][graph][hwdec]") {
+    Layout layout = make_layout();
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+
+    // 实测真值表：硬件帧不加前缀会失败，软件帧加了前缀也会失败，
+    // 没有一份图能同时兼容两种情况（SPEC §6.7）。
+    std::string sw = build_filter_graph(layout, 640, 360, 640, 360, false);
+    std::string hw = build_filter_graph(layout, 640, 360, 640, 360, true);
+
+    REQUIRE(sw.find("hwdownload") == std::string::npos);
+    REQUIRE(hw.rfind("hwdownload,format=", 0) == 0); // 必须在最前面
+    REQUIRE(hw.find("nv12") != std::string::npos);
+    REQUIRE(hw.find("p010le") != std::string::npos); // 给 10bit 留出口
+    // 前缀之外两者应当完全一致
+    REQUIRE(hw.substr(hw.find("split=")) == sw.substr(sw.find("split=")));
+    // 默认参数保持软件帧行为，避免调用方漏传时悄悄变成硬件帧图
+    REQUIRE(build_filter_graph(layout, 640, 360, 640, 360) == sw);
+}
+
 TEST_CASE("滤镜图里被引用的标签总是先定义后使用", "[layout][graph]") {
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kVertical));

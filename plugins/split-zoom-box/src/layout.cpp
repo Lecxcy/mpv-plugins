@@ -209,7 +209,8 @@ std::vector<PixelRect> compute_pane_rects(const Layout &layout, int canvas_w, in
     return out;
 }
 
-std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h) {
+std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h,
+                                bool hardware_frames) {
     std::vector<int> leaves = leaf_order(layout);
     if (leaves.size() < 2 || src_w <= 0 || src_h <= 0 || canvas_w <= 0 || canvas_h <= 0) {
         return {};
@@ -220,6 +221,12 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
     }
 
     std::string graph;
+
+    if (hardware_frames) {
+        // crop/scale 只吃软件帧。列出 nv12|p010le 而不是单写 nv12，是给 10bit
+        // 素材留出口——format 会从列表里挑一个输入支持的。
+        graph += "hwdownload,format=nv12|p010le,";
+    }
 
     graph += fmt::format("split={}", leaves.size());
     for (std::size_t i = 0; i < leaves.size(); ++i) {

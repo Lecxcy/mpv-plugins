@@ -272,11 +272,6 @@ struct PluginState {
     // 否则 time-pos 每帧回调都会触发一次重建。
     std::string applied_key;
 
-    // 进入多窗格前的 hwdec 设置。真硬件帧下 lavfi 的 crop/scale 会静默失效
-    // （vf add 返回 success、vf 属性仍报告 enabled，只有日志里说被禁用），
-    // 所以多窗格期间强制切成 auto-copy，退出时还原。
-    std::optional<std::string> saved_hwdec;
-
     std::string current_path;
     std::string current_path_key;
     std::string current_content_hash;
@@ -346,32 +341,20 @@ void reset_zoom_pan(PluginState &state) {
     mpv_util::set_double(state.handle, "video-pan-y", 0.0);
 }
 
-// 真硬件帧（hwdec-current 既不是 no 也不以 -copy 结尾）下滤镜会失效，
-// 进入多窗格前必须先切成回拷模式。auto-copy 不是退回软解，解码仍然是硬件
-// 加速的，只是多一步把帧拷回系统内存。
-void ensure_hwdec_for_filter(PluginState &state) {
-    if (state.saved_hwdec) {
-        return;
-    }
-    std::string current = get_string_property(state.handle, "hwdec-current");
+// 解码器当前吐的是不是真硬件帧（hwdec-current 既不是 no、也不以 -copy 结尾）。
+//
+// 早期实现是在进入多窗格时把 hwdec 切成 auto-copy、退出时还原，让滤镜永远只
+// 面对软件帧。那个做法有个致命问题：**改 hwdec 属性会重建解码器**，播放中
+// 反复重建会把 VideoToolbox 会话打坏，出现 -12909 "output image buffer is
+// null" 的连环解码失败，并且还原的时机和滤镜移除之间存在竞态（详见
+// SPEC §6.7）。现在改成完全不碰 hwdec，只是根据当前帧类型选择要不要在图头部
+// 加 hwdownload——解码器全程不受打扰。
+bool frames_are_hardware(mpv_handle *h) {
+    std::string current = get_string_property(h, "hwdec-current");
     if (current.empty() || current == "no") {
-        return;
+        return false;
     }
-    if (current.size() >= 5 && current.compare(current.size() - 5, 5, "-copy") == 0) {
-        return;
-    }
-    state.saved_hwdec = get_string_property(state.handle, "hwdec");
-    mpv_set_property_string(state.handle, "hwdec", "auto-copy");
-    MPV_UTIL_DEBUG("hwdec {} -> auto-copy (滤镜需要软件帧)\n", *state.saved_hwdec);
-}
-
-void restore_hwdec(PluginState &state) {
-    if (!state.saved_hwdec) {
-        return;
-    }
-    mpv_set_property_string(state.handle, "hwdec", state.saved_hwdec->c_str());
-    MPV_UTIL_DEBUG("hwdec 还原为 {}\n", *state.saved_hwdec);
-    state.saved_hwdec.reset();
+    return !(current.size() >= 5 && current.compare(current.size() - 5, 5, "-copy") == 0);
 }
 
 // 把当前生效的布局下发出去。单窗格走 video-zoom（零拷贝、不碰滤镜链），
@@ -391,7 +374,10 @@ void apply_layout(PluginState &state, bool force = false) {
         const Region &region = layout.nodes.empty() ? Region{} : layout.nodes[leaf_order(layout).front()].region;
         key = fmt::format("zoom:{:.6f},{:.6f},{:.6f},{:.6f}", region.x1, region.y1, region.x2, region.y2);
     } else {
-        graph = build_filter_graph(layout, size->src_w, size->src_h, size->canvas_w, size->canvas_h);
+        // 帧类型决定要不要 hwdownload 前缀，所以它天然进了 key：hwdec 在
+        // 外部被改动（用户按键切换、mpv 自己回退）时，key 会变，滤镜随之重建。
+        graph = build_filter_graph(layout, size->src_w, size->src_h, size->canvas_w, size->canvas_h,
+                                    frames_are_hardware(state.handle));
         if (graph.empty()) {
             return;
         }
@@ -404,7 +390,6 @@ void apply_layout(PluginState &state, bool force = false) {
 
     if (panes <= 1) {
         remove_split_filter(state);
-        restore_hwdec(state);
 
         std::vector<int> leaves = leaf_order(layout);
         Region region = leaves.empty() ? Region{} : layout.nodes[leaves.front()].region;
@@ -427,7 +412,6 @@ void apply_layout(PluginState &state, bool force = false) {
             mpv_util::set_double(state.handle, "video-pan-y", zoom_pan->pan_y);
         }
     } else {
-        ensure_hwdec_for_filter(state);
         // 多窗格时整块拼接画面不再额外缩放，否则屏幕坐标反查还要多一层复合。
         reset_zoom_pan(state);
 
@@ -449,7 +433,6 @@ void apply_layout(PluginState &state, bool force = false) {
 
 void clear_all_output(PluginState &state) {
     remove_split_filter(state);
-    restore_hwdec(state);
     reset_zoom_pan(state);
     state.applied_key.clear();
 }
@@ -907,7 +890,6 @@ void on_file_loaded(PluginState &state) {
     state.rename_from.reset();
     state.awaiting_confirm = false;
     state.applied_key.clear();
-    state.saved_hwdec.reset();
 }
 
 void handle_client_message(PluginState &state, mpv_event_client_message *message) {
@@ -968,6 +950,9 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
     mpv_observe_property(handle, 0, "time-pos", MPV_FORMAT_DOUBLE);
     // 窗口尺寸变化时焦点框要跟着重画。
     mpv_observe_property(handle, 0, "osd-dimensions", MPV_FORMAT_NODE);
+    // 帧类型决定滤镜图要不要 hwdownload 前缀。用户自己切 hwdec、或 mpv 因为
+    // 解码失败自动回退，都会让当前这张图不再适用，必须按新帧类型重建。
+    mpv_observe_property(handle, 0, "hwdec-current", MPV_FORMAT_STRING);
 
     while (true) {
         double timeout = state.dragging ? kRefreshIntervalSeconds : -1.0;
@@ -991,7 +976,8 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
             break;
         case MPV_EVENT_PROPERTY_CHANGE: {
             auto *prop = static_cast<mpv_event_property *>(event->data);
-            if (prop && std::strcmp(prop->name, "time-pos") == 0) {
+            if (prop && (std::strcmp(prop->name, "time-pos") == 0 ||
+                         std::strcmp(prop->name, "hwdec-current") == 0)) {
                 apply_layout(state);
             } else if (prop && std::strcmp(prop->name, "osd-dimensions") == 0) {
                 draw_focus_overlay(state);

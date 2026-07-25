@@ -71,8 +71,20 @@ std::vector<PixelRect> compute_pane_rects(const Layout &layout, int canvas_w, in
 // 每个窗格固定发 crop -> scale -> setsar=1。setsar 不能省：源的 SAR 会透过
 // scale 传下去，实测会把 dwidth 从 640 改成 720（画面被横向拉伸）。
 //
+// hardware_frames 表示解码器当前吐的是不是硬件帧。实测的真值表是：
+//
+//     帧类型      无前缀    hwdownload,format=...
+//     硬件帧      失败      成功
+//     软件帧      成功      失败
+//
+// 两种情况必须用不同的图，没有一份能同时兼容——所以调用方必须在生成时读一次
+// hwdec-current 来决定。刻意**不**通过切 hwdec 属性来统一成软件帧：反复切
+// hwdec 会把 VideoToolbox 解码器会话打坏（实测出现 -12909
+// "output image buffer is null" 连环解码失败），详见 SPEC §6.7。
+//
 // 单窗格布局不该走这里（调用方应改用 video-zoom 路径），传进来会返回空串。
-std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h);
+std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h,
+                                bool hardware_frames = false);
 
 struct PaneHit {
     int leaf = -1;  // 命中的叶子节点索引

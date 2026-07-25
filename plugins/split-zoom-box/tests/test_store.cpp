@@ -66,7 +66,6 @@ TEST_CASE("存档序列化往返", "[store]") {
     LayoutSegment seg;
     seg.a = 5.0;
     seg.b = 15.0;
-    seg.enabled = true;
     seg.layout = make_2x2();
     entry.segments.push_back(seg);
 
@@ -80,6 +79,20 @@ TEST_CASE("存档序列化往返", "[store]") {
     REQUIRE(back.segments[0].b == Catch::Approx(15.0));
     REQUIRE(leaf_count(back.segments[0].layout) == 4);
     REQUIRE(back.base.nodes[0].region.x1 == Catch::Approx(0.25));
+}
+
+TEST_CASE("老存档里的 enabled 字段被忽略而不是让整条解析失败", "[store]") {
+    // enabled 这个概念已经去掉了，但盘上可能还有带它的旧存档。
+    store::Archive archive = store::deserialize_archive(R"({"entries":{"k":{"segments":[
+        {"a":5.0,"b":15.0,"enabled":false,"layout":{"leaf":true,"region":[0.0,0.0,0.5,1.0]}}]}}})");
+    REQUIRE(archive.entries.count("k") == 1);
+    const auto &segments = archive.entries.at("k").segments;
+    REQUIRE(segments.size() == 1);
+    REQUIRE(segments[0].a == Catch::Approx(5.0));
+    // enabled=false 的旧段读回来照样生效——不再有"禁用"这个状态
+    REQUIRE(segments[0].layout.nodes[0].region.x2 == Catch::Approx(0.5));
+    // 再写出去时不应该带上这个字段
+    REQUIRE(store::serialize_archive(archive).find("enabled") == std::string::npos);
 }
 
 TEST_CASE("缺字段的老格式条目按默认值读", "[store]") {

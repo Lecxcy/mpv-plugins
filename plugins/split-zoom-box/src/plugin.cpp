@@ -1,5 +1,6 @@
 #include <mpv/client.h>
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -295,6 +296,16 @@ struct PluginState {
     Point drag_current;
     // 多窗格时限制拖拽范围的窗格屏幕矩形（屏幕像素）。
     std::optional<Box> drag_bounds;
+
+    // 平移（承接自已合并的 enhanced-drag）
+    bool panning = false;
+    bool pan_single = false;   // 单窗格走 video-pan-*，多窗格移动窗格的 Region
+    Point pan_last;            // 多窗格增量用
+    int pan_leaf = -1;
+    Point pan_origin_mouse;    // 单窗格：起点鼠标位置
+    double pan_origin_x = 0.0; // 单窗格：起点 video-pan-x/y
+    double pan_origin_y = 0.0;
+    std::chrono::steady_clock::time_point pan_last_apply{};
 };
 
 double time_pos(mpv_handle *h) {
@@ -457,7 +468,7 @@ void clear_all_output(PluginState &state) {
 // 缩放产生的黑边）。坐标反查必须用后者。
 struct PaneRects {
     PixelRect pane;
-    PixelRect content;
+    Region visible; // 窗格里实际看得到的那部分区域（归一化到 region 自身）
 };
 
 std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &layout, int leaf) {
@@ -476,7 +487,7 @@ std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &lay
     }
     PaneRects out;
     out.pane = rects[static_cast<std::size_t>(it - leaves.begin())];
-    out.content = pane_content_rect(layout.nodes[leaf].region, size->src_w, size->src_h, out.pane);
+    out.visible = pane_visible_fraction(layout.nodes[leaf].region, size->src_w, size->src_h, out.pane);
     return out;
 }
 
@@ -607,18 +618,22 @@ bool apply_drag_selection(PluginState &state, const Box &box, bool reset) {
     if (!rects) {
         return false;
     }
-    // 用**内容矩形**而不是整个窗格：保比缩放之后画面只占窗格的一部分，其余
-    // 是黑边。按整个窗格换算的话，框选位置会被整体算偏——黑边越宽偏得越多。
-    const PixelRect &rect = rects->content;
+    const PixelRect &rect = rects->pane;
     if (rect.w <= 0 || rect.h <= 0) {
         return false;
     }
 
+    // 画面铺满整个窗格，所以先按窗格归一化；但窗格里看到的只是区域的一个
+    // 居中子矩形（超出窗格比例的部分被裁掉了），所以还要再经可见比例折算回
+    // 区域自身的坐标——少了这一步，框选位置会随裁掉的比例整体算偏。
+    const Region &vis = rects->visible;
     auto to_pane_u = [&](double canvas_u) {
-        return std::clamp((canvas_u * size->canvas_w - rect.x) / rect.w, 0.0, 1.0);
+        double u = std::clamp((canvas_u * size->canvas_w - rect.x) / rect.w, 0.0, 1.0);
+        return vis.x1 + u * vis.width();
     };
     auto to_pane_v = [&](double canvas_v) {
-        return std::clamp((canvas_v * size->canvas_h - rect.y) / rect.h, 0.0, 1.0);
+        double v = std::clamp((canvas_v * size->canvas_h - rect.y) / rect.h, 0.0, 1.0);
+        return vis.y1 + v * vis.height();
     };
 
     double u1 = to_pane_u(canvas_box->x1);
@@ -631,6 +646,129 @@ bool apply_drag_selection(PluginState &state, const Box &box, bool reset) {
 
     Region pane_region = layout.nodes[hit->leaf].region;
     return set_focused_region(layout, subregion(pane_region, u1, v1, u2, v2));
+}
+
+// ---- 平移（合并自 enhanced-drag）----
+//
+// 单窗格：完全沿用 enhanced-drag 的做法，直接写 video-pan-x/y，从按下时的
+// 位置绝对计算，**不做任何边界约束**（用户明确要求过"拖到边界后不能再往外
+// 拖"体验不好），缩放为 0 时也能拖。
+//
+// 多窗格：video-pan-* 作用在整块拼接画面上，拖起来是整个画面一起动，不是
+// 用户要的。改成移动**鼠标所在窗格**的 Region——窗格显示的就是源画面上的一
+// 个窗口，平移它等于在源画面上挪这个窗口。这条路径必然被源画面边界夹住：
+// 窗口移出画面就没有内容可显示了。
+void pan_begin(PluginState &state) {
+    auto pos = read_mouse_pos(state.handle);
+    if (!pos) {
+        return;
+    }
+    state.panning = true;
+    state.pan_last = *pos;
+    state.pan_last_apply = {};
+
+    Layout &layout = active_layout(state);
+    if (leaf_count(layout) <= 1) {
+        state.pan_single = true;
+        state.pan_origin_mouse = *pos;
+        state.pan_origin_x = mpv_util::get_double(state.handle, "video-pan-x", 0.0);
+        state.pan_origin_y = mpv_util::get_double(state.handle, "video-pan-y", 0.0);
+        return;
+    }
+
+    state.pan_single = false;
+    state.pan_leaf = -1;
+    auto size = read_source_size(state.handle);
+    auto geometry = read_geometry(state.handle);
+    if (!size || !geometry || geometry->scaled_w <= 0.0 || geometry->scaled_h <= 0.0) {
+        return;
+    }
+    double cu = (pos->x - geometry->rect_x) / geometry->scaled_w;
+    double cv = (pos->y - geometry->rect_y) / geometry->scaled_h;
+    if (auto hit = hit_test(layout, size->canvas_w, size->canvas_h, std::clamp(cu, 0.0, 1.0),
+                             std::clamp(cv, 0.0, 1.0))) {
+        state.pan_leaf = hit->leaf;
+        layout.focused = hit->leaf;
+        draw_focus_overlay(state);
+    }
+}
+
+void pan_update(PluginState &state) {
+    if (!state.panning) {
+        return;
+    }
+    auto pos = read_mouse_pos(state.handle);
+    if (!pos) {
+        return;
+    }
+    auto geometry = read_geometry(state.handle);
+    if (!geometry) {
+        return;
+    }
+
+    if (state.pan_single) {
+        if (geometry->scaled_w > 0.0) {
+            mpv_util::set_double(state.handle, "video-pan-x",
+                                 state.pan_origin_x + (pos->x - state.pan_origin_mouse.x) / geometry->scaled_w);
+        }
+        if (geometry->scaled_h > 0.0) {
+            mpv_util::set_double(state.handle, "video-pan-y",
+                                 state.pan_origin_y + (pos->y - state.pan_origin_mouse.y) / geometry->scaled_h);
+        }
+        return;
+    }
+
+    Layout &layout = active_layout(state);
+    if (state.pan_leaf < 0 || static_cast<std::size_t>(state.pan_leaf) >= layout.nodes.size()) {
+        return;
+    }
+    double dx = pos->x - state.pan_last.x;
+    double dy = pos->y - state.pan_last.y;
+    if (dx == 0.0 && dy == 0.0) {
+        return;
+    }
+    state.pan_last = *pos;
+
+    auto rects = pane_canvas_rects(state, layout, state.pan_leaf);
+    if (!rects) {
+        return;
+    }
+    auto screen = canvas_rect_to_screen(state, rects->pane);
+    if (!screen) {
+        return;
+    }
+    double pw = screen->x2 - screen->x1;
+    double ph = screen->y2 - screen->y1;
+    if (pw <= 0.0 || ph <= 0.0) {
+        return;
+    }
+
+    Region &region = layout.nodes[state.pan_leaf].region;
+    // 画面跟着鼠标走：向右拖 = 看到更靠左的内容 = 区域左移，所以取负号。
+    // 窗格里只看得到区域的一部分（visible），换算要带上这一层。
+    double du = -(dx / pw) * rects->visible.width() * region.width();
+    double dv = -(dy / ph) * rects->visible.height() * region.height();
+    region = pan_region(region, du, dv);
+
+    // 多窗格平移要重建滤镜链，60Hz 重建会明显卡顿，这里限流到 ~16fps；
+    // 松开鼠标时无条件补一次，保证最终位置准确。
+    auto now = std::chrono::steady_clock::now();
+    if (now - state.pan_last_apply >= std::chrono::milliseconds(60)) {
+        state.pan_last_apply = now;
+        apply_layout(state);
+    }
+}
+
+void pan_finish(PluginState &state) {
+    if (!state.panning) {
+        return;
+    }
+    pan_update(state);
+    state.panning = false;
+    if (!state.pan_single) {
+        apply_layout(state);
+        draw_focus_overlay(state);
+    }
 }
 
 void drag_begin(PluginState &state) {
@@ -654,9 +792,8 @@ void drag_begin(PluginState &state) {
             double cv = (pos->y - geometry->rect_y) / geometry->scaled_h;
             if (auto hit = hit_test(layout, size->canvas_w, size->canvas_h, std::clamp(cu, 0.0, 1.0),
                                      std::clamp(cv, 0.0, 1.0))) {
-                // 限制到**内容矩形**：黑边上没有画面，不该能框出东西。
                 if (auto rects = pane_canvas_rects(state, layout, hit->leaf)) {
-                    state.drag_bounds = canvas_rect_to_screen(state, rects->content);
+                    state.drag_bounds = canvas_rect_to_screen(state, rects->pane);
                 }
                 state.drag_start.x = std::clamp(state.drag_start.x, state.drag_bounds->x1,
                                                  state.drag_bounds->x2);
@@ -1054,6 +1191,15 @@ void handle_client_message(PluginState &state, mpv_event_client_message *message
 
     // 拖拽需要按下/松开两个边沿，其余按键只在按下（或无法区分时的单次触发）
     // 时响应。
+    if (binding == "drag-pan") {
+        if (phase == 'd') {
+            pan_begin(state);
+        } else if (phase == 'u') {
+            pan_finish(state);
+        }
+        return;
+    }
+
     if (binding == "drag-select") {
         if (phase == 'd') {
             drag_begin(state);
@@ -1110,7 +1256,7 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
     mpv_observe_property(handle, 0, "hwdec-current", MPV_FORMAT_STRING);
 
     while (true) {
-        double timeout = state.dragging ? kRefreshIntervalSeconds : -1.0;
+        double timeout = (state.dragging || state.panning) ? kRefreshIntervalSeconds : -1.0;
         mpv_event *event = mpv_wait_event(handle, timeout);
 
         switch (event->event_id) {
@@ -1141,6 +1287,7 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
         }
         case MPV_EVENT_NONE:
             drag_update(state);
+            pan_update(state);
             break;
         default:
             break;

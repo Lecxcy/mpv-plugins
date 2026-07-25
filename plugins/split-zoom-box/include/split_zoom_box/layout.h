@@ -86,12 +86,20 @@ std::vector<PixelRect> compute_pane_rects(const Layout &layout, int canvas_w, in
 std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h,
                                 bool hardware_frames = false);
 
-// 窗格里**实际画面**所占的矩形——保比缩放（force_original_aspect_ratio）
-// 之后，画面只占窗格的一部分，其余是 pad 出来的黑边。
+// 窗格里**实际看得到**的那部分区域，归一化到 region 自身的 [0,1]。
 //
-// 坐标反查必须用这个矩形而不是整个窗格：黑边上没有画面，按整个窗格算会把
-// 框选位置整体算偏。它同时也用来限制拖拽范围——黑边上不该能框出东西。
-PixelRect pane_content_rect(const Region &region, int src_w, int src_h, const PixelRect &pane);
+// 窗格用"放大到填满、裁掉溢出"的方式显示区域（滤镜里的
+// force_original_aspect_ratio=increase + crop），所以当区域的宽高比和窗格
+// 对不上时，窗格里看到的只是区域的一个**居中子矩形**，两侧/上下超出的部分
+// 被裁掉了。
+//
+// 坐标反查必须先经过它：屏幕上量到的位置是相对"看得到的那部分"的，直接当成
+// 相对整个区域会算偏。
+Region pane_visible_fraction(const Region &region, int src_w, int src_h, const PixelRect &pane);
+
+// 平移区域：按归一化位移移动，保持尺寸不变，并夹在源画面范围内
+// （区域本身就是源画面上的一个窗口，移出去没有内容可显示）。
+Region pan_region(const Region &region, double du, double dv);
 
 struct PaneHit {
     int leaf = -1;  // 命中的叶子节点索引

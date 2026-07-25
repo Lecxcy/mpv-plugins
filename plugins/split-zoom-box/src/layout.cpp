@@ -239,12 +239,15 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
         CropParams crop = region_to_crop(node.region, src_w, src_h);
         int pw = clamp_positive(rects[i].w);
         int ph = clamp_positive(rects[i].h);
-        // force_original_aspect_ratio=decrease + pad：把裁出来的区域按原比例
-        // 缩到窗格内、不足的部分补黑边居中。直接 scale 到窗格尺寸会把画面拉
-        // 变形——窗格的宽高比通常和源区域对不上（例如 16:9 的源塞进左右对半
-        // 分出来的半宽窗格）。
-        graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{}:force_original_aspect_ratio=decrease,"
-                             "pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1[p{}];",
+        // force_original_aspect_ratio=increase + crop：按原比例放大到**填满**
+        // 窗格，超出窗格比例的部分居中裁掉。
+        //
+        // 不用 decrease+pad（保比缩小、补黑边）：那样窗格里会留大片黑边，而
+        // 单窗格路径下同样的框选是"周边画面填满窗口"、看起来是占满的，两条
+        // 路径观感对不上。直接 scale 到窗格尺寸则会把画面拉变形。
+        // 代价是选区超出窗格比例的部分看不到，这是明确选择过的取舍。
+        graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{}:force_original_aspect_ratio=increase,"
+                             "crop={}:{},setsar=1[p{}];",
                              i, crop.w, crop.h, crop.x, crop.y, pw, ph, pw, ph, i);
     }
 
@@ -279,18 +282,41 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
     return graph;
 }
 
-PixelRect pane_content_rect(const Region &region, int src_w, int src_h, const PixelRect &pane) {
+Region pane_visible_fraction(const Region &region, int src_w, int src_h, const PixelRect &pane) {
+    Region full;
     if (pane.w <= 0 || pane.h <= 0 || src_w <= 0 || src_h <= 0) {
-        return pane;
+        return full;
     }
     CropParams crop = region_to_crop(region, src_w, src_h);
-    // 与滤镜里 scale=...:force_original_aspect_ratio=decrease 的算法保持一致：
-    // 两个轴各自需要的缩放比取较小的那个，保证整块内容都进得去。
-    double scale = std::min(static_cast<double>(pane.w) / crop.w, static_cast<double>(pane.h) / crop.h);
-    int w = std::clamp(static_cast<int>(std::lround(crop.w * scale)), 1, pane.w);
-    int h = std::clamp(static_cast<int>(std::lround(crop.h * scale)), 1, pane.h);
-    // 居中方式与 pad=...:(ow-iw)/2:(oh-ih)/2 一致（整数除法，偏左上）。
-    return PixelRect{pane.x + (pane.w - w) / 2, pane.y + (pane.h - h) / 2, w, h};
+    // 与滤镜里 force_original_aspect_ratio=increase 一致：两轴所需缩放比取
+    // 较大者，保证填满窗格。
+    double scale = std::max(static_cast<double>(pane.w) / crop.w, static_cast<double>(pane.h) / crop.h);
+    double scaled_w = crop.w * scale;
+    double scaled_h = crop.h * scale;
+    if (scaled_w <= 0.0 || scaled_h <= 0.0) {
+        return full;
+    }
+    // 放大后超出窗格的部分被居中裁掉，可见比例就是窗格尺寸占放大后尺寸的比。
+    double fx = std::clamp(pane.w / scaled_w, 0.0, 1.0);
+    double fy = std::clamp(pane.h / scaled_h, 0.0, 1.0);
+
+    Region vis;
+    vis.x1 = (1.0 - fx) / 2.0;
+    vis.x2 = vis.x1 + fx;
+    vis.y1 = (1.0 - fy) / 2.0;
+    vis.y2 = vis.y1 + fy;
+    return vis;
+}
+
+Region pan_region(const Region &region, double du, double dv) {
+    double w = region.width();
+    double h = region.height();
+    Region out;
+    out.x1 = std::clamp(region.x1 + du, 0.0, std::max(0.0, 1.0 - w));
+    out.y1 = std::clamp(region.y1 + dv, 0.0, std::max(0.0, 1.0 - h));
+    out.x2 = out.x1 + w;
+    out.y2 = out.y1 + h;
+    return out;
 }
 
 std::optional<PaneHit> hit_test(const Layout &layout, int canvas_w, int canvas_h, double cu, double cv) {

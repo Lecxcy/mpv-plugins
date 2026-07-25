@@ -157,6 +157,7 @@ TEST_CASE("crop 参数落在源画面范围内且不为零", "[layout][graph]") 
     std::string graph = build_filter_graph(layout, 640, 360, 640, 360);
     REQUIRE_FALSE(graph.empty());
     REQUIRE(graph.find("crop=0:") == std::string::npos);
+    REQUIRE(graph.find("force_original_aspect_ratio=increase") != std::string::npos);
     REQUIRE(graph.find(":0:") != std::string::npos); // 完整画面那格的 x 偏移是 0
 }
 
@@ -196,57 +197,66 @@ TEST_CASE("窗格内框选换算回源坐标（坐标反查往返）", "[layout]
     REQUIRE(flipped.x2 == Catch::Approx(result.x2));
 }
 
-TEST_CASE("窗格内容矩形扣掉了保比缩放的黑边", "[layout][aspect]") {
-    // 16:9 的完整画面塞进一个 640x720 的窄窗格：宽度撑满，上下留黑边
+TEST_CASE("窗格可见比例反映被裁掉的部分", "[layout][aspect]") {
+    // 1280x720 的完整画面塞进 640x720 的窄窗格：高度已经正好，所以按 1.0
+    // 缩放、再把宽度居中裁掉一半 —— 水平只看得到中间 50%，垂直全见。
     PixelRect pane{0, 0, 640, 720};
-    PixelRect content = pane_content_rect(Region{}, 1280, 720, pane);
-    REQUIRE(content.w == 640);
-    REQUIRE(content.h == 360);
-    REQUIRE(content.x == 0);
-    REQUIRE(content.y == 180); // 居中
-    // 宽高比保持 16:9
-    REQUIRE(static_cast<double>(content.w) / content.h == Catch::Approx(16.0 / 9.0));
+    Region vis = pane_visible_fraction(Region{}, 1280, 720, pane);
+    REQUIRE(vis.height() == Catch::Approx(1.0)); // 垂直全见
+    REQUIRE(vis.width() == Catch::Approx(0.5));  // 水平被裁掉一半
+    // 裁剪是居中的
+    REQUIRE(vis.x1 == Catch::Approx(0.25));
+    REQUIRE(vis.x2 == Catch::Approx(0.75));
 
-    // 区域宽高比正好等于窗格时应当占满，没有黑边。
-    // 720x720 的源里取 0..0.5 x 0..0.5 就是 360x360 的正方形区域。
-    PixelRect square_pane{0, 0, 360, 360};
-    PixelRect filled = pane_content_rect(Region{0.0, 0.0, 0.5, 0.5}, 720, 720, square_pane);
-    REQUIRE(filled.w == 360);
-    REQUIRE(filled.h == 360);
-    REQUIRE(filled.x == 0);
-    REQUIRE(filled.y == 0);
-
-    // 区域比窗格更"高"时反过来：高度撑满，左右留黑边
-    PixelRect tall = pane_content_rect(Region{0.0, 0.0, 0.5, 1.0}, 720, 720, square_pane);
-    REQUIRE(tall.h == 360);
-    REQUIRE(tall.w == 180);
-    REQUIRE(tall.x == 90); // 水平居中
+    // 区域宽高比正好等于窗格时应当完全可见，什么都不裁
+    PixelRect square{0, 0, 360, 360};
+    Region full = pane_visible_fraction(Region{0.0, 0.0, 0.5, 0.5}, 720, 720, square);
+    REQUIRE(full.width() == Catch::Approx(1.0));
+    REQUIRE(full.height() == Catch::Approx(1.0));
 }
 
-TEST_CASE("框选换算走内容矩形，黑边不参与（回归）", "[layout][aspect]") {
-    // 左右分屏，左格显示完整 16:9 画面 -> 内容只占窗格中间一条，上下是黑边。
+TEST_CASE("框选换算要经过可见比例折算（回归）", "[layout][aspect]") {
+    // 左右分屏，左格显示完整画面 -> 水平方向只看得到中间 50%。
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kHorizontal));
     std::vector<PixelRect> panes = compute_pane_rects(layout, 1280, 720);
-    PixelRect content = pane_content_rect(Region{}, 1280, 720, panes[0]);
+    Region vis = pane_visible_fraction(Region{}, 1280, 720, panes[0]);
 
-    // 在内容正中间框一个居中的小框，换算回源坐标应当也居中。
-    double u1 = 0.25, u2 = 0.75, v1 = 0.25, v2 = 0.75;
-    Region got = subregion(layout.nodes[leaf_order(layout)[0]].region, u1, v1, u2, v2);
-    REQUIRE(got.x1 == Catch::Approx(0.25));
-    REQUIRE(got.y1 == Catch::Approx(0.25));
+    // 在窗格水平正中间框选，折算回区域坐标也应当是正中间
+    double u_region = vis.x1 + 0.5 * vis.width();
+    REQUIRE(u_region == Catch::Approx(0.5));
 
-    // 关键回归：同一个屏幕位置，用"内容矩形"和用"整个窗格（含黑边）"当分母
-    // 换算出来的归一化坐标必须不同——用错分母就是之前"放大后位置不对"的原因。
-    //
-    // 注意不能拿垂直中点来验：内容是居中放置的，中点在两种算法下恰好都等于
-    // 0.5，是唯一验不出差别的位置。这里取内容的上边缘。
-    double py = content.y; // 画面顶端
-    double v_content = (py - content.y) / content.h;
-    double v_pane = (py - panes[0].y) / panes[0].h;
-    REQUIRE(v_content == Catch::Approx(0.0));
-    REQUIRE(v_pane == Catch::Approx(0.25)); // 180/720：黑边占掉了上面 1/4
-    REQUIRE(v_content != Catch::Approx(v_pane));
+    // 关键回归：窗格左边缘对应的**不是**区域左边缘——中间隔着被裁掉的部分。
+    // 少了这层折算，框选位置会随裁掉的比例整体算偏。
+    double left_region = vis.x1 + 0.0 * vis.width();
+    REQUIRE(left_region == Catch::Approx(0.25));
+    REQUIRE(left_region != Catch::Approx(0.0));
+}
+
+TEST_CASE("平移保持区域大小并夹在源画面内", "[layout][pan]") {
+    Region r{0.2, 0.2, 0.4, 0.4};
+    Region moved = pan_region(r, 0.1, -0.05);
+    REQUIRE(moved.width() == Catch::Approx(r.width()));
+    REQUIRE(moved.height() == Catch::Approx(r.height()));
+    REQUIRE(moved.x1 == Catch::Approx(0.3));
+    REQUIRE(moved.y1 == Catch::Approx(0.15));
+
+    // 往左上顶到边界
+    Region clamped = pan_region(r, -10.0, -10.0);
+    REQUIRE(clamped.x1 == Catch::Approx(0.0));
+    REQUIRE(clamped.y1 == Catch::Approx(0.0));
+    REQUIRE(clamped.width() == Catch::Approx(r.width()));
+
+    // 往右下顶到边界：右下角贴住 1.0
+    Region clamped2 = pan_region(r, 10.0, 10.0);
+    REQUIRE(clamped2.x2 == Catch::Approx(1.0));
+    REQUIRE(clamped2.y2 == Catch::Approx(1.0));
+    REQUIRE(clamped2.width() == Catch::Approx(r.width()));
+
+    // 完整画面无处可移
+    Region fullr = pan_region(Region{}, 0.3, 0.3);
+    REQUIRE(fullr.x1 == Catch::Approx(0.0));
+    REQUIRE(fullr.x2 == Catch::Approx(1.0));
 }
 
 TEST_CASE("关闭窗格后兄弟顶替父节点", "[layout]") {

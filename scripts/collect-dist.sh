@@ -31,7 +31,7 @@ dist_dir="${2:-dist}"
 [[ "${dist_dir}" != /* ]] && dist_dir="${repo_root}/${dist_dir}"
 
 # 已完成 C++ 重写的插件；名字与 CMake target 名 / .so 文件名一致。
-cpp_plugins=(enhanced-rotation enhanced-drag split-zoom-box enhanced-ab-loop enhanced-seek enhanced-volume)
+cpp_plugins=(enhanced-rotation split-zoom-box enhanced-ab-loop enhanced-seek enhanced-volume)
 
 # 直接分发的纯 Lua 插件。每个名字对应 plugins/<name>/lua：如果里面有
 # main.lua（目录式脚本，比如 uosc），整个目录复制成 scripts/<name>/；

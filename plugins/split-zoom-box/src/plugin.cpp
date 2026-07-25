@@ -689,6 +689,21 @@ void pan_begin(PluginState &state) {
                              std::clamp(cv, 0.0, 1.0))) {
         state.pan_leaf = hit->leaf;
         layout.focused = hit->leaf;
+
+        // 平移前先把区域收敛成"窗格里实际看得到的那部分"。
+        //
+        // 填满式显示会把超出窗格比例的部分裁掉，所以一个铺满整幅画面的区域
+        // （0,0,1,1）在窗格里其实只露出中间一段——左右/上下是有内容没显示
+        // 出来的。但 pan_region 是把区域夹在源画面内的，宽高都是 1 时可移动
+        // 余量正好为 0，于是"未放大时拖不动"。
+        //
+        // 收敛之后区域的宽高比与窗格一致、不再有被裁掉的部分，视觉上完全
+        // 等价（看到的内容一模一样），但有了可平移的余量。
+        if (auto rects = pane_canvas_rects(state, layout, hit->leaf)) {
+            Region &region = layout.nodes[hit->leaf].region;
+            const Region &vis = rects->visible;
+            region = subregion(region, vis.x1, vis.y1, vis.x2, vis.y2);
+        }
         draw_focus_overlay(state);
     }
 }

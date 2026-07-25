@@ -233,6 +233,30 @@ TEST_CASE("框选换算要经过可见比例折算（回归）", "[layout][aspec
     REQUIRE(left_region != Catch::Approx(0.0));
 }
 
+TEST_CASE("完整画面收敛成可见部分后就有平移余量（回归）", "[layout][pan]") {
+    // 未放大时区域是整幅画面，宽高都是 1，pan_region 的可移动余量正好为 0，
+    // 直接平移会被夹死——这就是"未放大时拖不动"的成因。
+    Region full;
+    REQUIRE(pan_region(full, 0.3, 0.0).x1 == Catch::Approx(0.0));
+
+    // 但填满式显示其实只露出中间一段，左右是有内容没显示出来的。
+    // 先收敛成"看得到的那部分"，视觉等价，却腾出了平移余量。
+    PixelRect pane{0, 0, 640, 720};
+    Region vis = pane_visible_fraction(full, 1280, 720, pane);
+    Region shrunk = subregion(full, vis.x1, vis.y1, vis.x2, vis.y2);
+    REQUIRE(shrunk.width() == Catch::Approx(0.5));
+    REQUIRE(shrunk.x1 == Catch::Approx(0.25)); // 居中
+
+    Region moved = pan_region(shrunk, -0.2, 0.0);
+    REQUIRE(moved.x1 == Catch::Approx(0.05)); // 真的动了
+    REQUIRE(moved.width() == Catch::Approx(shrunk.width()));
+
+    // 收敛后的区域宽高比与窗格一致，所以不再有被裁掉的部分
+    Region vis2 = pane_visible_fraction(shrunk, 1280, 720, pane);
+    REQUIRE(vis2.width() == Catch::Approx(1.0));
+    REQUIRE(vis2.height() == Catch::Approx(1.0));
+}
+
 TEST_CASE("平移保持区域大小并夹在源画面内", "[layout][pan]") {
     Region r{0.2, 0.2, 0.4, 0.4};
     Region moved = pan_region(r, 0.1, -0.05);

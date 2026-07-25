@@ -237,8 +237,15 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
     for (std::size_t i = 0; i < leaves.size(); ++i) {
         const Node &node = layout.nodes[leaves[i]];
         CropParams crop = region_to_crop(node.region, src_w, src_h);
-        graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{},setsar=1[p{}];", i, crop.w, crop.h, crop.x,
-                             crop.y, clamp_positive(rects[i].w), clamp_positive(rects[i].h), i);
+        int pw = clamp_positive(rects[i].w);
+        int ph = clamp_positive(rects[i].h);
+        // force_original_aspect_ratio=decrease + pad：把裁出来的区域按原比例
+        // 缩到窗格内、不足的部分补黑边居中。直接 scale 到窗格尺寸会把画面拉
+        // 变形——窗格的宽高比通常和源区域对不上（例如 16:9 的源塞进左右对半
+        // 分出来的半宽窗格）。
+        graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{}:force_original_aspect_ratio=decrease,"
+                             "pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1[p{}];",
+                             i, crop.w, crop.h, crop.x, crop.y, pw, ph, pw, ph, i);
     }
 
     // 叶子节点索引 -> 它在 leaves 里的序号，用来查 pN 标签。

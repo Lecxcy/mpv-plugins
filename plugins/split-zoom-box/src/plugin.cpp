@@ -22,12 +22,19 @@ using namespace split_zoom_box;
 constexpr double kRefreshIntervalSeconds = 1.0 / 60.0;
 constexpr double kMinDragPixels = 4.0;
 constexpr double kBorderWidth = 2.0;
-constexpr const char *kColorZoom = "00FF00";
-constexpr const char *kColorReset = "0000FF";
+// 焦点框比框选框粗，否则在窗格边缘很难一眼看出选中的是哪个窗格。
+constexpr double kFocusBorderWidth = 5.0;
+
+// 注意：ASS 的颜色是 &HBBGGRR&（蓝绿红），不是常见的 RRGGBB。
+// 下面这几个常量都按 ASS 的字节序写。kColorZoom/kColorNeutral 前后对称，
+// 两种解读一样；kColorReset 承接自 drag-zoom-box，实际渲染出来是红色
+// （旧文档里写成"蓝色"是按 RRGGBB 误读的）。
+constexpr const char *kColorZoom = "00FF00";    // 绿
+constexpr const char *kColorReset = "0000FF";   // 红
 // 拖拽方向还没落在合法对角线上时展示的中性色，让用户在拖拽过程中就能看出
 // "这个方向不会触发任何动作"。承接自 drag-zoom-box。
-constexpr const char *kColorNeutral = "808080";
-constexpr const char *kColorFocus = "FFC000";
+constexpr const char *kColorNeutral = "808080"; // 灰
+constexpr const char *kColorFocus = "00A5FF";   // 橙
 
 constexpr int kSelectionOverlayId = 0;
 constexpr int kFocusOverlayId = 1;
@@ -242,10 +249,11 @@ void clear_overlay(mpv_handle *handle, int id) {
     set_overlay(handle, id, "none", "", 0, 720, 0);
 }
 
-std::string ass_rect(double x1, double y1, double x2, double y2, const char *color) {
+std::string ass_rect(double x1, double y1, double x2, double y2, const char *color,
+                      double border = kBorderWidth) {
     return fmt::format("{{\\an7\\pos(0,0)\\bord{:.3f}\\shad0\\1a&HFF&\\3a&H00&\\3c&H{}&\\p1}}"
                        "m {:.3f} {:.3f} l {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}{{\\p0}}",
-                       kBorderWidth, color, x1, y1, x2, y1, x2, y2, x1, y2, x1, y1);
+                       border, color, x1, y1, x2, y1, x2, y2, x1, y2, x1, y1);
 }
 
 const char *color_for_direction(DragDirection direction) {
@@ -285,6 +293,8 @@ struct PluginState {
     bool dragging = false;
     Point drag_start;
     Point drag_current;
+    // 多窗格时限制拖拽范围的窗格屏幕矩形（屏幕像素）。
+    std::optional<Box> drag_bounds;
 };
 
 double time_pos(mpv_handle *h) {
@@ -359,11 +369,14 @@ bool frames_are_hardware(mpv_handle *h) {
 
 // 把当前生效的布局下发出去。单窗格走 video-zoom（零拷贝、不碰滤镜链），
 // 多窗格才挂滤镜。
-void apply_layout(PluginState &state, bool force = false) {
+//
+// 返回值表示这次是否真的改变了输出。调用方据此决定要不要重画焦点框：
+// time-pos 每帧都回调，不能每帧都重画叠加层。
+bool apply_layout(PluginState &state, bool force = false) {
     Layout &layout = active_layout(state);
     auto size = read_source_size(state.handle);
     if (!size) {
-        return;
+        return false;
     }
 
     int panes = leaf_count(layout);
@@ -379,13 +392,13 @@ void apply_layout(PluginState &state, bool force = false) {
         graph = build_filter_graph(layout, size->src_w, size->src_h, size->canvas_w, size->canvas_h,
                                     frames_are_hardware(state.handle));
         if (graph.empty()) {
-            return;
+            return false;
         }
         key = "graph:" + graph;
     }
 
     if (!force && key == state.applied_key) {
-        return;
+        return false;
     }
 
     if (panes <= 1) {
@@ -398,14 +411,14 @@ void apply_layout(PluginState &state, bool force = false) {
         } else {
             auto geometry = read_geometry(state.handle);
             if (!geometry) {
-                return;
+                return false;
             }
             // 换算依赖的是"缩放为 0 时的基准尺寸"，与当前 zoom 无关，
             // 所以可以从任意缩放状态直接算出目标值，不需要先归零。
             auto zoom_pan = region_to_zoom_pan(region, geometry->osd_w, geometry->osd_h, geometry->base_w,
                                                 geometry->base_h);
             if (!zoom_pan) {
-                return;
+                return false;
             }
             mpv_util::set_double(state.handle, "video-zoom", zoom_pan->zoom);
             mpv_util::set_double(state.handle, "video-pan-x", zoom_pan->pan_x);
@@ -424,11 +437,12 @@ void apply_layout(PluginState &state, bool force = false) {
             // 失败信号；不检查的话内存布局会和实际画面静默不一致。
             mpv_util::show_osd_message(state.handle, "分屏滤镜应用失败", kOsdDuration);
             MPV_UTIL_DEBUG("vf add 失败: {}\n", spec);
-            return;
+            return false;
         }
     }
 
     state.applied_key = key;
+    return true;
 }
 
 void clear_all_output(PluginState &state) {
@@ -439,45 +453,65 @@ void clear_all_output(PluginState &state) {
 
 // ---- 焦点提示 ----
 
-void draw_focus_overlay(PluginState &state) {
-    Layout &layout = active_layout(state);
-    if (leaf_count(layout) <= 1) {
-        clear_overlay(state.handle, kFocusOverlayId);
-        return;
-    }
-    auto window = read_window_size(state.handle);
+// 某个窗格在**屏幕像素**里的矩形。焦点框要画在这里，拖拽框选也要被限制在
+// 这里——多窗格时框选越过中缝没有意义，落到另一个窗格上的部分会被丢掉。
+std::optional<Box> pane_screen_rect(PluginState &state, const Layout &layout, int leaf) {
     auto geometry = read_geometry(state.handle);
     auto size = read_source_size(state.handle);
-    if (!window || !geometry || !size) {
-        return;
+    if (!geometry || !size) {
+        return std::nullopt;
     }
-
     std::vector<int> leaves = leaf_order(layout);
     std::vector<PixelRect> rects = compute_pane_rects(layout, size->canvas_w, size->canvas_h);
     if (leaves.size() != rects.size()) {
-        return;
+        return std::nullopt;
     }
-    auto it = std::find(leaves.begin(), leaves.end(), layout.focused);
+    auto it = std::find(leaves.begin(), leaves.end(), leaf);
     if (it == leaves.end()) {
-        return;
+        return std::nullopt;
     }
     const PixelRect &rect = rects[static_cast<std::size_t>(it - leaves.begin())];
 
-    // 画布像素 -> 屏幕像素
-    double sx1 = geometry->rect_x + (static_cast<double>(rect.x) / size->canvas_w) * geometry->scaled_w;
-    double sy1 = geometry->rect_y + (static_cast<double>(rect.y) / size->canvas_h) * geometry->scaled_h;
-    double sx2 = geometry->rect_x +
-                 (static_cast<double>(rect.x + rect.w) / size->canvas_w) * geometry->scaled_w;
-    double sy2 = geometry->rect_y +
-                 (static_cast<double>(rect.y + rect.h) / size->canvas_h) * geometry->scaled_h;
+    Box box;
+    box.x1 = geometry->rect_x + (static_cast<double>(rect.x) / size->canvas_w) * geometry->scaled_w;
+    box.y1 = geometry->rect_y + (static_cast<double>(rect.y) / size->canvas_h) * geometry->scaled_h;
+    box.x2 = geometry->rect_x + (static_cast<double>(rect.x + rect.w) / size->canvas_w) * geometry->scaled_w;
+    box.y2 = geometry->rect_y + (static_cast<double>(rect.y + rect.h) / size->canvas_h) * geometry->scaled_h;
+    return box;
+}
 
-    set_overlay(state.handle, kFocusOverlayId, "ass-events", ass_rect(sx1, sy1, sx2, sy2, kColorFocus),
+void draw_focus_overlay(PluginState &state) {
+    Layout &layout = active_layout(state);
+    auto window = read_window_size(state.handle);
+    if (leaf_count(layout) <= 1 || !window) {
+        clear_overlay(state.handle, kFocusOverlayId);
+        return;
+    }
+    auto rect = pane_screen_rect(state, layout, layout.focused);
+    if (!rect) {
+        return;
+    }
+    // 边框画在窗格内侧：贴着边画的话，相邻两个窗格的框会在中缝重叠成一条线，
+    // 分不出高亮的是哪一边。
+    double inset = kFocusBorderWidth / 2.0;
+    set_overlay(state.handle, kFocusOverlayId, "ass-events",
+                ass_rect(rect->x1 + inset, rect->y1 + inset, rect->x2 - inset, rect->y2 - inset, kColorFocus,
+                          kFocusBorderWidth),
                 static_cast<int>(window->w), static_cast<int>(window->h), kOverlayZ);
 }
 
 void refresh(PluginState &state, bool force = false) {
     apply_layout(state, force);
     draw_focus_overlay(state);
+}
+
+// time-pos 每帧都回调，只有布局真的换了才重画/清掉焦点框——否则要么 60Hz
+// 刷叠加层，要么（像之前那样）进出分屏段时焦点框根本不更新：进段不出现、
+// 出段不消失。
+void apply_and_sync_overlay(PluginState &state) {
+    if (apply_layout(state)) {
+        draw_focus_overlay(state);
+    }
 }
 
 // ---- 拖拽框选 ----
@@ -583,6 +617,28 @@ void drag_begin(PluginState &state) {
     state.dragging = true;
     state.drag_start = *pos;
     state.drag_current = *pos;
+
+    // 多窗格时把整个拖拽限制在起始窗格内：跨过中缝的部分本来也会被丢掉，
+    // 与其让用户画出一个大半无效的框，不如让框自己停在边界上。
+    state.drag_bounds.reset();
+    Layout &layout = active_layout(state);
+    if (leaf_count(layout) > 1) {
+        auto size = read_source_size(state.handle);
+        auto geometry = read_geometry(state.handle);
+        if (size && geometry && geometry->scaled_w > 0.0 && geometry->scaled_h > 0.0) {
+            double cu = (pos->x - geometry->rect_x) / geometry->scaled_w;
+            double cv = (pos->y - geometry->rect_y) / geometry->scaled_h;
+            if (auto hit = hit_test(layout, size->canvas_w, size->canvas_h, std::clamp(cu, 0.0, 1.0),
+                                     std::clamp(cv, 0.0, 1.0))) {
+                state.drag_bounds = pane_screen_rect(state, layout, hit->leaf);
+                state.drag_start.x = std::clamp(state.drag_start.x, state.drag_bounds->x1,
+                                                 state.drag_bounds->x2);
+                state.drag_start.y = std::clamp(state.drag_start.y, state.drag_bounds->y1,
+                                                 state.drag_bounds->y2);
+                state.drag_current = state.drag_start;
+            }
+        }
+    }
     draw_selection(state);
 }
 
@@ -592,6 +648,12 @@ void drag_update(PluginState &state) {
     }
     if (auto pos = read_mouse_pos(state.handle)) {
         state.drag_current = *pos;
+        if (state.drag_bounds) {
+            state.drag_current.x = std::clamp(state.drag_current.x, state.drag_bounds->x1,
+                                               state.drag_bounds->x2);
+            state.drag_current.y = std::clamp(state.drag_current.y, state.drag_bounds->y1,
+                                               state.drag_bounds->y2);
+        }
     }
     draw_selection(state);
 }
@@ -602,8 +664,15 @@ void drag_finish(PluginState &state) {
     }
     if (auto pos = read_mouse_pos(state.handle)) {
         state.drag_current = *pos;
+        if (state.drag_bounds) {
+            state.drag_current.x = std::clamp(state.drag_current.x, state.drag_bounds->x1,
+                                               state.drag_bounds->x2);
+            state.drag_current.y = std::clamp(state.drag_current.y, state.drag_bounds->y1,
+                                               state.drag_bounds->y2);
+        }
     }
     state.dragging = false;
+    state.drag_bounds.reset();
     clear_overlay(state.handle, kSelectionOverlayId);
 
     Box box = normalize_box(state.drag_start, state.drag_current);
@@ -671,9 +740,19 @@ void on_focus_next(PluginState &state) {
 }
 
 void on_segment_start(PluginState &state) {
-    state.pending_segment_start = time_pos(state.handle);
-    mpv_util::show_osd_message(state.handle, fmt::format("分屏段起点 {:.2f}s", *state.pending_segment_start),
-                               kOsdDuration);
+    double pos = time_pos(state.handle);
+    // 起点就落在已有区间里的话，无论终点设在哪都必然重叠。在这里就拒掉，
+    // 不要等用户跑到终点再说——那时候他已经白操作一轮了。
+    if (auto index = find_segment_at(state.segments, pos)) {
+        mpv_util::show_osd_message(
+            state.handle,
+            fmt::format("这里已在分屏段 {:.2f}s - {:.2f}s 内", state.segments[*index].a,
+                        state.segments[*index].b),
+            kOsdDuration);
+        return;
+    }
+    state.pending_segment_start = pos;
+    mpv_util::show_osd_message(state.handle, fmt::format("分屏段起点 {:.2f}s", pos), kOsdDuration);
 }
 
 void on_segment_end(PluginState &state) {
@@ -978,7 +1057,7 @@ extern "C" int mpv_open_cplugin(mpv_handle *handle) {
             auto *prop = static_cast<mpv_event_property *>(event->data);
             if (prop && (std::strcmp(prop->name, "time-pos") == 0 ||
                          std::strcmp(prop->name, "hwdec-current") == 0)) {
-                apply_layout(state);
+                apply_and_sync_overlay(state);
             } else if (prop && std::strcmp(prop->name, "osd-dimensions") == 0) {
                 draw_focus_overlay(state);
             }

@@ -290,22 +290,25 @@ function ass_escape(str)
 end
 
 ---@param seconds number
----@param max_seconds number|nil Trims unnecessary `00:` if time is not expected to reach it.
+---@param max_seconds number|nil Unused: minutes are always shown (see below), there's nothing left to trim.
 ---@return string
 function format_time(seconds, max_seconds)
-	local human = mp.format_time(seconds)
+	-- Always `MM:SS` (minutes zero-padded to at least 2 digits, growing past
+	-- that instead of rolling into an `H:` field) -- never mpv's own
+	-- `mp.format_time` HH:MM:SS, and never trimmed down to bare seconds for
+	-- short files. `max_seconds` used to pick how many of HH:MM:SS to trim;
+	-- kept as a parameter so call sites don't need to change, but the new
+	-- format doesn't depend on it.
+	local is_negative = seconds < 0
+	local whole_seconds = math.floor(math.abs(seconds))
+	local minutes = math.floor(whole_seconds / 60)
+	local secs = whole_seconds % 60
+	local human = string.format('%02d:%02d', minutes, secs)
 	if options.time_precision > 0 then
 		local formatted = string.format('%.' .. options.time_precision .. 'f', math.abs(seconds) % 1)
 		human = human .. '.' .. string.sub(formatted, 3)
 	end
-	if max_seconds then
-		local trim_length = (max_seconds < 60 and 7 or (max_seconds < 3600 and 4 or 0))
-		if trim_length > 0 then
-			local has_minus = seconds < 0
-			human = string.sub(human, trim_length + (has_minus and 1 or 0))
-			if has_minus then human = '-' .. human end
-		end
-	end
+	if is_negative then human = '-' .. human end
 	return human
 end
 

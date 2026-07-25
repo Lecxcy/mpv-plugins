@@ -110,6 +110,14 @@
 - 具体的"发布"那一侧改动（`user-data/enhanced-ab-loop/segments` 属性怎么
   写入）在 [enhanced-ab-loop 的 README](../enhanced-ab-loop/README.md#实现说明)
   里，不在这个仓库范围内重复。
+- **`lib/utils.lua` 的 `format_time`**：改成固定 `MM:SS`（分钟至少两位、
+  不封顶，超过 99 分钟就自然变成三位数，比如 `123:45`），不再用
+  `mp.format_time` 的 `HH:MM:SS` 再按 `max_seconds` 裁剪——原来的裁剪逻辑
+  在文件时长 < 1 分钟时会把分钟也裁掉、只剩秒数（比如 20 秒的文件上显示
+  `12`/`-08`），时长 ≥ 1 小时又会显示出小时位（比如 70 分钟显示成
+  `01:10:00`）。这个函数是进度条左右两侧时间、hover 时间提示（含
+  thumbfast 缩略图旁边那个提示）、章节 tooltip、顶栏剩余时间共用的唯一
+  实现，改这一处全部生效。
 
 ## 同步历史
 
@@ -125,4 +133,7 @@
   这条链路会静默解析失败（`state.ab_loop_segments` 一直是空表），把这个
   observer 换成 `'native'` 格式接收 enhanced-ab-loop 直接发布的
   `MPV_FORMAT_NODE` 后解决，用截图逐像素采样确认了两段区间同时正确显示
-  为实心色块。
+  为实心色块；同一天还把 `lib/utils.lua` 的 `format_time` 改成固定
+  `MM:SS`（不再在短文件上裁剪掉分钟、也不再在超过 1 小时后冒出小时位），
+  用截图确认 20 秒的测试文件上正确显示 `00:12`/`-00:08` 而不是原来的
+  `12`/`-08`。

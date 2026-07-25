@@ -30,7 +30,7 @@ defaults = {
 	timeline_heatmap = 'overlay',
 
 	controls =
-	'menu,gap,<video,audio>subtitles,<has_many_audio>audio,<has_many_video>video,<has_many_edition>editions,<stream>stream-quality,gap,space,<video,audio>speed,space,shuffle,loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen',
+	'menu,gap,<has_many_audio>audio,<has_many_video>video,<has_many_edition>editions,<stream>stream-quality,gap,space,<video,audio>speed,space,shuffle,loop-playlist,loop-file,gap,prev,items,next,gap,fullscreen',
 	controls_size = 32,
 	controls_margin = 8,
 	controls_spacing = 2,
@@ -90,7 +90,6 @@ defaults = {
 	audio_types =
 	'aac,ac3,aiff,ape,au,cue,dsf,dts,flac,m4a,mid,midi,mka,mp3,mp4a,oga,ogg,opus,spx,tak,tta,wav,weba,wma,wv',
 	image_types = 'apng,avif,bmp,gif,j2k,jp2,jfif,jpeg,jpg,jxl,mj2,png,svg,tga,tif,tiff,webp',
-	subtitle_types = 'aqt,ass,gsub,idx,jss,lrc,mks,pgs,pjs,psb,rt,sbv,slt,smi,sub,sup,srt,ssa,ssf,ttxt,txt,usf,vt,vtt',
 	playlist_types = 'm3u,m3u8,pls,url,cue',
 	load_types = 'video,audio,image',
 	default_directory = '~/',
@@ -100,7 +99,6 @@ defaults = {
 	chapter_ranges = 'openings:30abf964,endings:30abf964,ads:c54e4e80',
 	chapter_range_patterns = 'openings:オープニング;endings:エンディング',
 	languages = 'slang,en',
-	subtitles_directory = '~~/subtitles',
 	disable_elements = '',
 }
 options = table_copy(defaults)
@@ -173,12 +171,6 @@ local config_defaults = {
 }
 config = {
 	version = uosc_version,
-	-- 上游默认自带一个公开的 OpenSubtitles 应用 key（标识客户端用，不是账号
-	-- 凭证，参见 plugins/uosc/README.md），但会被通用密钥扫描器误报成疑似
-	-- 泄露；这里本来就用不到字幕下载功能（menu/controls 都禁用了，没有
-	-- 任何按键能打开这个菜单），清空即可，不影响本地实际使用的功能。
-	open_subtitles_api_key = '',
-	open_subtitles_agent = 'uosc v' .. uosc_version,
 	-- sets max rendering frequency in case the
 	-- native rendering frequency could not be detected
 	render_delay = 1 / 60,
@@ -192,7 +184,6 @@ config = {
 		video = comma_split(options.video_types),
 		audio = comma_split(options.audio_types),
 		image = comma_split(options.image_types),
-		subtitle = comma_split(options.subtitle_types),
 		playlist = comma_split(options.playlist_types),
 		media = comma_split(options.video_types
 			.. ',' .. options.audio_types
@@ -307,7 +298,6 @@ update_config()
 -- Default menu items
 function create_default_menu_items()
 	return {
-		{title = t('Subtitles'), value = 'script-binding uosc/subtitles'},
 		{title = t('Audio tracks'), value = 'script-binding uosc/audio'},
 		{title = t('Stream quality'), value = 'script-binding uosc/stream-quality'},
 		{title = t('Playlist'), value = 'script-binding uosc/items'},
@@ -847,13 +837,6 @@ bind_command('keybinds', function()
 		open_command_menu({type = 'keybinds', items = get_keybinds_items(), search_style = 'palette'})
 	end
 end)
-bind_command('download-subtitles', open_subtitle_downloader)
-bind_command('load-subtitles', create_track_loader_menu_opener({
-	prop = 'sub',
-	title = t('Load subtitles'),
-	loaded_message = t('Loaded subtitles'),
-	allowed_types = itable_join(config.types.video, config.types.subtitle),
-}))
 bind_command('load-audio', create_track_loader_menu_opener({
 	prop = 'audio',
 	title = t('Load audio'),
@@ -865,15 +848,6 @@ bind_command('load-video', create_track_loader_menu_opener({
 	title = t('Load video'),
 	loaded_message = t('Loaded video'),
 	allowed_types = config.types.video,
-}))
-bind_command('subtitles', create_select_tracklist_type_menu_opener({
-	title = t('Subtitles'),
-	type = 'sub',
-	prop = 'sid',
-	enable_prop = 'sub-visibility',
-	secondary = {prop = 'secondary-sid', icon = 'vertical_align_top', enable_prop = 'secondary-sub-visibility'},
-	load_command = 'script-binding uosc/load-subtitles',
-	download_command = 'script-binding uosc/download-subtitles',
 }))
 bind_command('audio', create_select_tracklist_type_menu_opener({
 	title = t('Audio'), type = 'audio', prop = 'aid', load_command = 'script-binding uosc/load-audio',

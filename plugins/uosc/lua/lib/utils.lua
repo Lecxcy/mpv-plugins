@@ -857,14 +857,10 @@ do
 	end
 end
 
----@param type 'sub'|'audio'|'video'
+---@param type 'audio'|'video'
 ---@param path string
 function load_track(type, path)
 	mp.commandv(type .. '-add', path, 'cached')
-	-- If subtitle track was loaded, assume the user also wants to see it
-	if type == 'sub' then
-		mp.commandv('set', 'sub-visibility', 'yes')
-	end
 end
 
 ---@param args (string|number)[]

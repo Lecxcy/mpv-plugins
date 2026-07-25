@@ -41,8 +41,8 @@
 按 `lua/elements/` 划分、各自独立的 UI 元素：
 
 - **Timeline**：底部/悬浮进度条，支持章节标记、缓存/热力图、拖动 seek。
-- **Controls**：可配置图标控制栏（菜单、字幕/音轨/视频轨切换、倍速、
-  上一个/下一个等），具体按钮由 `uosc.conf` 的 `controls` 选项拼装。
+- **Controls**：可配置图标控制栏（菜单、音轨/视频轨切换、倍速、上一个/
+  下一个等），具体按钮由 `uosc.conf` 的 `controls` 选项拼装。
 - **Volume**：音量滑块。
 - **TopBar**：顶部标题栏 + 窗口控制按钮（最小化/最大化/关闭），可替代
   系统窗口边框。
@@ -51,9 +51,9 @@
 - **PauseIndicator**：暂停状态指示，`static`/`flash`/`manual` 三种模式。
 - **BufferingIndicator**：缓冲圈指示。
 - **Button / CycleButton / ManagedButton**：控制栏按钮基类，非独立功能。
-- **Menu**：可搜索的弹出菜单框架；主菜单、字幕/音轨/视频轨选择、播放
-  列表、章节、Edition、流媒体画质、按键一览、打开文件等都是基于它的
-  具体菜单实例，不是单独的 element。
+- **Menu**：可搜索的弹出菜单框架；主菜单、音轨/视频轨选择、播放列表、
+  章节、Edition、流媒体画质、按键一览、打开文件等都是基于它的具体菜单
+  实例，不是单独的 element（字幕相关的菜单/命令已经整个删掉，见下方）。
 - **Curtain**：菜单打开时的背景遮罩。
 - **Updater**：只有用户主动执行 `script-binding uosc/update` 命令时才会
   实例化（`main.lua` 里 `bind_command('update', ...)`），向 GitHub API
@@ -65,13 +65,14 @@
 `volume`、`idle_indicator`、`audio_indicator`、`buffering_indicator`、
 `pause_indicator`。
 
-会主动发起网络请求的功能只有两处，且都需要用户手动触发一次，默认启动时
+会主动发起网络请求的功能现在只剩一处，需要用户手动触发一次，默认启动时
 不会自动联网：
 
-- `download-subtitles` 菜单命令：向 [OpenSubtitles](https://www.opensubtitles.com)
-  查询/下载字幕（同时会把当前文件的内容哈希发给对方用于精确匹配）。
 - `update`/`updater` 命令：查询 GitHub 最新 release，并可执行安装脚本
   自升级。
+
+`download-subtitles`（向 [OpenSubtitles](https://www.opensubtitles.com)
+查询/下载字幕）已经整个删掉了，见下方"相对上游的改动"。
 
 上面这些当前全部通过 `disable_elements` 关闭了实例化（`Manager:_commit()`
 按这份名单决定要不要 `:new()`，被禁用的元素模块文件仍会被 `require`——
@@ -118,14 +119,40 @@
   `01:10:00`）。这个函数是进度条左右两侧时间、hover 时间提示（含
   thumbfast 缩略图旁边那个提示）、章节 tooltip、顶栏剩余时间共用的唯一
   实现，改这一处全部生效。
-- **`main.lua` 的 `open_subtitles_api_key`**：清空成空字符串。上游默认带的
-  是一个公开的 OpenSubtitles 应用 key（标识客户端用，不是账号凭证——类似
-  OAuth 里的 `client_id` 而不是 `client_secret`，作用参见"功能概览"里的
-  网络请求那两条），但通用密钥扫描器（TruffleHog/GitGuardian 之类）看不出
-  这个区别，只按"像随机字符串+靠近 api_key 字样"这种启发式规则，会把它
-  误报成疑似泄露的密钥。本地这套配置里 `controls`/菜单系统本来就禁用了，
-  没有任何按键能打开字幕下载菜单，清空这个值不影响任何实际功能，只是
-  为了不再触发扫描器误报。
+- **删掉了字幕相关的全部功能代码**（不只是禁用，是整个删掉，起因是上游
+  自带的 OpenSubtitles 应用 key 被公司的通用密钥扫描器误报成疑似泄露——
+  这个 key 其实是标识客户端用的公开值，不是账号凭证，类似 OAuth 里的
+  `client_id` 而不是 `client_secret`，但扫描器分不出这个区别）：
+  - `lib/menus.lua`：删掉整个 `open_subtitle_downloader` 函数（原文件
+    最后约 250 行，从 `download-subtitles` 菜单一直到文件末尾）。
+  - `main.lua`：删掉 `open_subtitles_api_key`/`open_subtitles_agent`
+    配置项、`subtitle_types`/`subtitles_directory` 默认值、
+    `config.types.subtitle`、默认菜单树里的"Subtitles"条目、
+    `download-subtitles`/`load-subtitles`/`subtitles` 三个
+    `bind_command`，以及 `controls` 默认值字符串里的 `<video,audio>subtitles`
+    段。`load-audio`/`load-video`/`audio`/`video`/`playlist` 等其余
+    `bind_command` 均未受影响，共用的
+    `create_track_loader_menu_opener`/`create_select_tracklist_type_menu_opener`
+    两个通用菜单构造函数也原样保留（本来就是 audio/video/subtitle 共用，
+    参数化的，不是字幕专属代码）。
+  - `lib/utils.lua`：`load_track(type, path)` 去掉了
+    `if type == 'sub' then ... end` 那个字幕专属分支，类型注解从
+    `'sub'|'audio'|'video'` 改成 `'audio'|'video'`。
+  - `uosc.conf`：同步删掉 `subtitle_types`/`subtitles_directory` 两个
+    选项及其注释、`controls` 默认值里的 `<video,audio>subtitles`、
+    `{shorthand}` 语法说明里的 `subtitles` 示例。**没有**动
+    `has_sub`/`has_many_sub` 这两个 disposition 说明——它们是根据文件轨道
+    信息算出来的通用状态标记（跟 `has_audio`/`has_video` 同一套机制），
+    不是"字幕下载/选择"这个功能本身。
+  - **没有动** `elements/Controls.lua` 里那个 `subtitles = 'command:...'`
+    按钮定义——`Controls` 整个元素都在 `disable_elements` 里，永远不会
+    被实例化，这个文件完全不运行，改它没有实际收益，纯粹是历史遗留在一个
+    死文件里。
+
+  以上删除后，`ctest` 115 个测试仍然全绿，也用 IPC 重新跑过一遍
+  ab-loop 区间集成的端到端验证（插入/切换区间、读回
+  `user-data/enhanced-ab-loop/segments`、匹配当前激活段），结果和删除前
+  完全一致，确认这次删除没有影响任何实际在用的功能。
 
 ## 同步历史
 
@@ -144,6 +171,10 @@
   为实心色块；同一天还把 `lib/utils.lua` 的 `format_time` 改成固定
   `MM:SS`（不再在短文件上裁剪掉分钟、也不再在超过 1 小时后冒出小时位），
   用截图确认 20 秒的测试文件上正确显示 `00:12`/`-00:08` 而不是原来的
-  `12`/`-08`；`main.lua` 的 `open_subtitles_api_key` 清空成空字符串，原因
-  见上方"相对上游的改动"——上游那个公开应用 key 被通用密钥扫描器误报成
-  疑似泄露，本地这套配置又摸不到字幕下载功能，清空即可。
+  `12`/`-08`；最初只把 `open_subtitles_api_key` 清空成空字符串应对密钥
+  扫描器误报，后来确定这套配置固定不再跟上游同步，索性把字幕相关的
+  功能代码整个删掉（`lib/menus.lua` 的 `open_subtitle_downloader`、
+  `main.lua` 里对应的配置项/菜单条目/`bind_command`、
+  `lib/utils.lua` 的 `load_track` 里字幕专属分支），细节见上方
+  "相对上游的改动"；删除后 `ctest` 和 ab-loop 区间集成的端到端验证
+  结果与删除前一致。

@@ -301,7 +301,7 @@ double time_pos(mpv_handle *h) {
     return mpv_util::get_double(h, "time-pos", 0.0);
 }
 
-// 当前时间点生效的布局：落在某个 enabled 区间内就用它的，否则用 base。
+// 当前时间点生效的布局：落在某个区间内就用它的，否则用 base。
 // 编辑操作也作用在这同一个对象上——"在哪个时间点编辑，就改哪份布局"。
 Layout &active_layout(PluginState &state) {
     if (auto index = find_segment_at(state.segments, time_pos(state.handle))) {
@@ -688,6 +688,52 @@ void drag_finish(PluginState &state) {
 
 // ---- 按键动作 ----
 
+std::string format_time(double seconds) {
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+    int total = static_cast<int>(seconds + 0.5);
+    return fmt::format("{:02d}:{:02d}", total / 60, total % 60);
+}
+
+// 编辑落到全局布局上时提醒一句。只在**已经存在分屏段**时提示：没有段的时候
+// base 就是唯一的布局，不存在"改错地方"的可能，提示纯属噪音。
+void warn_if_editing_base(PluginState &state) {
+    if (state.segments.empty()) {
+        return;
+    }
+    if (!find_segment_at(state.segments, time_pos(state.handle))) {
+        mpv_util::show_osd_message(state.handle, "正在编辑全局布局（不在任何分屏段内）", kOsdDuration);
+    }
+}
+
+// 列出所有分屏段和当前所处位置。对应 enhanced-ab-loop 的 show-state。
+void on_show_state(PluginState &state) {
+    double pos = time_pos(state.handle);
+    auto current = find_segment_at(state.segments, pos);
+
+    std::string text = fmt::format("分屏 | {} | 当前：", format_time(pos));
+    if (current) {
+        text += fmt::format("段 {}", *current + 1);
+    } else {
+        text += fmt::format("全局（{} 格）", leaf_count(state.base));
+    }
+    if (state.pending_segment_start) {
+        text += fmt::format("  待定起点 {}", format_time(*state.pending_segment_start));
+    }
+
+    if (state.segments.empty()) {
+        text += "\\N（没有分屏段）";
+    } else {
+        for (std::size_t i = 0; i < state.segments.size(); ++i) {
+            const LayoutSegment &seg = state.segments[i];
+            text += fmt::format("\\N{}{}. {} - {}  {} 格", (current && *current == i) ? "> " : "  ", i + 1,
+                                 format_time(seg.a), format_time(seg.b), leaf_count(seg.layout));
+        }
+    }
+    mpv_util::show_osd_message(state.handle, text, 4.0);
+}
+
 void on_split(PluginState &state, SplitDir dir) {
     auto size = read_source_size(state.handle);
     if (!size) {
@@ -709,6 +755,7 @@ void on_split(PluginState &state, SplitDir dir) {
         }
     }
     refresh(state);
+    warn_if_editing_base(state);
     mpv_util::show_osd_message(state.handle, fmt::format("分屏：{} 个窗格", leaf_count(layout)), kOsdDuration);
 }
 
@@ -762,11 +809,12 @@ void on_segment_end(PluginState &state) {
     }
     double a = *state.pending_segment_start;
     double b = time_pos(state.handle);
-    if (b < a) {
-        std::swap(a, b);
-    }
-    if (b - a <= 0.0) {
-        mpv_util::show_osd_message(state.handle, "分屏段长度为零，已忽略", kOsdDuration);
+    // 终点必须严格晚于起点。之前是 b<a 就把两者对调——那是"猜用户想干什么"
+    // 的隐式行为：用户明确把终点设在起点之前，多半是记错了位置，直接拒绝
+    // 让他重设，比悄悄换个意思更好。
+    if (b <= a) {
+        mpv_util::show_osd_message(
+            state.handle, fmt::format("终点 {:.2f}s 不晚于起点 {:.2f}s，已拒绝", b, a), kOsdDuration);
         return;
     }
     if (overlapping_segment(state.segments, a, b)) {
@@ -774,17 +822,16 @@ void on_segment_end(PluginState &state) {
         return;
     }
 
-    // 把"当前正在编辑的这份布局"快照进新区间；区间外恢复正常画面，所以
-    // base 同时被重置回完整画面。
+    // 把"当前正在编辑的这份布局"快照进新区间。
+    // 注意这里**不**重置 base：早期版本会把全局布局清成完整画面，等于用户
+    // 建一个分屏段就把已有的全局缩放悄悄抹掉，是个没确认过的副作用。
     LayoutSegment segment;
     segment.a = a;
     segment.b = b;
-    segment.enabled = true;
     segment.layout = active_layout(state);
     state.segments.push_back(segment);
     sort_segments(state.segments);
     state.pending_segment_start.reset();
-    state.base = make_layout();
 
     refresh(state, true);
     mpv_util::show_osd_message(state.handle, fmt::format("分屏段 {:.2f}s - {:.2f}s（共 {} 段）", a, b,
@@ -1005,6 +1052,8 @@ void handle_client_message(PluginState &state, mpv_event_client_message *message
         on_segment_start(state);
     } else if (binding == "segment-end") {
         on_segment_end(state);
+    } else if (binding == "show-state") {
+        on_show_state(state);
     } else if (binding == "segment-clear") {
         on_segment_clear(state);
     } else if (binding == "save-layouts") {

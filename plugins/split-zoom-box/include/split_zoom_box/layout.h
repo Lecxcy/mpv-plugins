@@ -103,11 +103,14 @@ Region subregion(const Region &pane, double u1, double v1, double u2, double v2)
 // ---- 时间段 ----
 
 // 一段时间内生效的分屏布局。区间之间互不重叠（由 overlapping_segment 在插入
-// 时把关），语义与 enhanced-ab-loop 的 segment 对齐：播出区间就恢复正常画面。
+// 时把关）。
+//
+// 刻意**不**做 enabled 标志：enhanced-ab-loop 需要"临时禁用某段但不删掉"是
+// 因为循环是全程高频使用的；分屏没有这个使用模式，加了只是多一份要维护、
+// 要持久化、要在 UI 上体现的状态。要停用就直接删。
 struct LayoutSegment {
     double a = 0.0;
     double b = 0.0;
-    bool enabled = true;
     Layout layout;
 };
 
@@ -117,7 +120,7 @@ struct LayoutSegment {
 // 不能用在"存下来的值互相比较"上。
 void sort_segments(std::vector<LayoutSegment> &segments);
 
-// 落在闭区间 [a,b] 内的第一个 enabled 区间。
+// 落在闭区间 [a,b] 内的第一个区间。
 std::optional<std::size_t> find_segment_at(const std::vector<LayoutSegment> &segments, double pos);
 
 // 与已有区间重叠则返回那个区间的下标。冲突直接拒绝插入，不做隐式的边界借用

@@ -319,7 +319,7 @@ void sort_segments(std::vector<LayoutSegment> &segments) {
 std::optional<std::size_t> find_segment_at(const std::vector<LayoutSegment> &segments, double pos) {
     for (std::size_t i = 0; i < segments.size(); ++i) {
         const LayoutSegment &seg = segments[i];
-        if (seg.enabled && pos >= seg.a && pos <= seg.b) {
+        if (pos >= seg.a && pos <= seg.b) {
             return i;
         }
     }

@@ -116,7 +116,7 @@ Layout layout_from_json(const nlohmann::json &item) {
 }
 
 nlohmann::json segment_to_json(const LayoutSegment &seg) {
-    return {{"a", seg.a}, {"b", seg.b}, {"enabled", seg.enabled}, {"layout", layout_to_json(seg.layout)}};
+    return {{"a", seg.a}, {"b", seg.b}, {"layout", layout_to_json(seg.layout)}};
 }
 
 std::optional<LayoutSegment> segment_from_json(const nlohmann::json &item) {
@@ -126,7 +126,7 @@ std::optional<LayoutSegment> segment_from_json(const nlohmann::json &item) {
     LayoutSegment seg;
     seg.a = item.value("a", 0.0);
     seg.b = item.value("b", 0.0);
-    seg.enabled = item.value("enabled", true);
+    // 老存档里的 "enabled" 字段直接忽略：这个概念已经去掉了，不做迁移。
     seg.layout = item.contains("layout") ? layout_from_json(item["layout"]) : make_layout();
     return seg;
 }

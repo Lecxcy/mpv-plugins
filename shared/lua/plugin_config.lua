@@ -37,10 +37,4 @@ return {
             { elapsed = math.huge, interval = 0.07 },
         },
     },
-    tail_frame_extension = {
-        enabled = true,
-        duration = 0.3,
-        video_filter_label = "tail-frame-extension-video",
-        audio_filter_label = "tail-frame-extension-audio",
-    },
 }

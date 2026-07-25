@@ -23,7 +23,7 @@ namespace {
 
 using namespace enhanced_ab_loop;
 
-// 重写后合并了原 tail-frame-extension 插件的配置，不再拆两份。
+// 尾帧冻结的配置也在这里，插件内部统一管理，不再拆两份。
 constexpr double kNudgeStep = 0.05;
 constexpr double kStateOsdDuration = 1.8;
 constexpr double kToggleOsdDuration = 1.8;

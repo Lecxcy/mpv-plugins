@@ -11,7 +11,7 @@
   手势 Zoom 逻辑并进行优化，仅放大框选范围，只认左上到右下、右下到左上
   两个对角线方向。
 - [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)（C++）：仿 PotPlayer
-  的 A/B Loop 表现并进行优化，支持设置多段不相交的 Loop 区间，并入了
+  的 A/B Loop 表现并进行优化，支持设置多段不相交的 Loop 区间，并内建了
   尾帧冻结能力。
 - [enhanced-drag](plugins/enhanced-drag/README.md)（C++）：仿 PotPlayer 的
   手势 Pane 拖拽逻辑。
@@ -21,9 +21,6 @@
   快退显示。
 - [enhanced-volume](plugins/enhanced-volume/README.md)（C++）：修改了 mpv 的
   音量调整逻辑及显示，支持长按连续变化。
-- [tail-frame-extension](plugins/tail-frame-extension/README.md)（Lua）：缓
-  解了 mpv 在 loop 跳转时跳过尾帧的问题；与 enhanced-ab-loop 同时使用时
-  不需要加载本插件，能力已并入。
 - [uosc](plugins/uosc/README.md)（Lua）：替代 mpv 内置 `osc.lua` 的完整
   OSD 皮肤 + 菜单系统，本地只保留进度条并集成了 enhanced-ab-loop 的多段
   循环展示。

@@ -1,8 +1,8 @@
 # enhanced-ab-loop
 
 仿 PotPlayer 的 A/B Loop 表现并进行优化，支持设置多段不相交的 Loop 区间；
-C++ 重写后并入了原 `tail-frame-extension` 插件"循环到文件末尾时冻结尾帧"
-的能力。完整设计讨论过程见 [SPEC.md](SPEC.md)。
+C++ 重写后内建了"循环到文件末尾时冻结尾帧"的能力。完整设计讨论过程见
+[SPEC.md](SPEC.md)。
 
 ## 来源
 
@@ -22,7 +22,7 @@ C++ 实现（mpv C plugin），源码见 `src/`、`include/`；旧 Lua 实现保
 `time-pos` 判断是否越过循环终点，完全没有使用 mpv 原生的
 `ab-loop-a`/`ab-loop-b` 属性；`sort_segments` 的比较函数用 epsilon 容差做
 tie-break，不满足严格弱序；`eof-reached` 回调硬编码跳到列表里最靠前的一
-段；循环终点无法设到 `tail-frame-extension` 补出来的尾部延长段里。
+段；循环终点无法设到 `tpad`/`apad` 滤镜补出来的尾部延长段里。
 
 C++ 版本是一次完整重写，不是逐行移植，主要改动（详细讨论过程见
 [SPEC.md](SPEC.md)）：
@@ -33,13 +33,12 @@ C++ 版本是一次完整重写，不是逐行移植，主要改动（详细讨�
   `MPSEEK_EXACT` 精确 seek）。每次落到某个区间起点后，立刻把
   `ab-loop-a`/`ab-loop-b` 预置为"下一段起点/本段终点"，跳转发生时直接精确
   seek 到下一段，不会闪现一帧再补跳。
-- **尾帧冻结并入本插件**：`ab-loop-b` 的 pts 截断判断发生在 vf/af 滤镜链
+- **尾帧冻结内建在本插件**：`ab-loop-b` 的 pts 截断判断发生在 vf/af 滤镜链
   之后，`tpad`/`apad` 补出来的克隆帧同样有真实递增的 pts；把终点语义是
   "循环到文件末尾"的区间，实际写入的 `ab-loop-b` 换成"真实末尾 pts + 冻结
   时长"，让原生机制播入（不是 seek 进）延长段后自然触发跳转，不需要暂停
   状态或自定义计时器。文件加载时无条件对视频/音频轨施加
-  `tpad=stop_mode=clone`/`apad=pad_dur`（沿用 `tail-frame-extension.lua`
-  的做法）。
+  `tpad=stop_mode=clone`/`apad=pad_dur`。
 - **修复两个已确认的 bug**：`sort_segments` 改成精确比较（不再有 epsilon
   tie-break 破坏传递性的问题）；`eof-reached` 兜底改成跳到 active 队列里
   *最后*一项自己的起点（不是硬编码第一项）。
@@ -192,7 +191,7 @@ C++ 版本是一次完整重写，不是逐行移植，主要改动（详细讨�
 ## 同步历史
 
 - 2026-07-18：从 mpv-scripts@`96f11dd` 完成初始迁移（纯 Lua）。
-- 2026-07-19：完整重写为 C++，并入 `tail-frame-extension` 的尾帧冻结能力，
+- 2026-07-19：完整重写为 C++，内建尾帧冻结能力，
   设计讨论过程见 [SPEC.md](SPEC.md)，主要改动见上文。
 - 2026-07-22：新增模板（9 个编号槽位，完整快照式而非共享池+掩码）、快速
   跳段（`Tab`）、`pending` 持久化，设计讨论过程见 [SPEC.md §10-§11](SPEC.md)。

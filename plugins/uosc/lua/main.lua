@@ -173,7 +173,11 @@ local config_defaults = {
 }
 config = {
 	version = uosc_version,
-	open_subtitles_api_key = 'b0rd16N0bp7DETMpO4pYZwIqmQkZbYQr',
+	-- 上游默认自带一个公开的 OpenSubtitles 应用 key（标识客户端用，不是账号
+	-- 凭证，参见 plugins/uosc/README.md），但会被通用密钥扫描器误报成疑似
+	-- 泄露；这里本来就用不到字幕下载功能（menu/controls 都禁用了，没有
+	-- 任何按键能打开这个菜单），清空即可，不影响本地实际使用的功能。
+	open_subtitles_api_key = '',
 	open_subtitles_agent = 'uosc v' .. uosc_version,
 	-- sets max rendering frequency in case the
 	-- native rendering frequency could not be detected

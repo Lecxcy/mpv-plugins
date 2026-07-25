@@ -453,12 +453,16 @@ void clear_all_output(PluginState &state) {
 
 // ---- 焦点提示 ----
 
-// 某个窗格在**屏幕像素**里的矩形。焦点框要画在这里，拖拽框选也要被限制在
-// 这里——多窗格时框选越过中缝没有意义，落到另一个窗格上的部分会被丢掉。
-std::optional<Box> pane_screen_rect(PluginState &state, const Layout &layout, int leaf) {
-    auto geometry = read_geometry(state.handle);
+// 某个窗格在画布像素里的矩形，以及它内部**实际画面**所占的矩形（去掉保比
+// 缩放产生的黑边）。坐标反查必须用后者。
+struct PaneRects {
+    PixelRect pane;
+    PixelRect content;
+};
+
+std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &layout, int leaf) {
     auto size = read_source_size(state.handle);
-    if (!geometry || !size) {
+    if (!size) {
         return std::nullopt;
     }
     std::vector<int> leaves = leaf_order(layout);
@@ -470,14 +474,34 @@ std::optional<Box> pane_screen_rect(PluginState &state, const Layout &layout, in
     if (it == leaves.end()) {
         return std::nullopt;
     }
-    const PixelRect &rect = rects[static_cast<std::size_t>(it - leaves.begin())];
+    PaneRects out;
+    out.pane = rects[static_cast<std::size_t>(it - leaves.begin())];
+    out.content = pane_content_rect(layout.nodes[leaf].region, size->src_w, size->src_h, out.pane);
+    return out;
+}
 
+// 画布像素矩形 -> 屏幕像素矩形。
+std::optional<Box> canvas_rect_to_screen(PluginState &state, const PixelRect &rect) {
+    auto geometry = read_geometry(state.handle);
+    auto size = read_source_size(state.handle);
+    if (!geometry || !size || size->canvas_w <= 0 || size->canvas_h <= 0) {
+        return std::nullopt;
+    }
     Box box;
     box.x1 = geometry->rect_x + (static_cast<double>(rect.x) / size->canvas_w) * geometry->scaled_w;
     box.y1 = geometry->rect_y + (static_cast<double>(rect.y) / size->canvas_h) * geometry->scaled_h;
     box.x2 = geometry->rect_x + (static_cast<double>(rect.x + rect.w) / size->canvas_w) * geometry->scaled_w;
     box.y2 = geometry->rect_y + (static_cast<double>(rect.y + rect.h) / size->canvas_h) * geometry->scaled_h;
     return box;
+}
+
+// 焦点框画在整个窗格上（表示"这一格是选中的"），不是只画在画面上。
+std::optional<Box> pane_screen_rect(PluginState &state, const Layout &layout, int leaf) {
+    auto rects = pane_canvas_rects(state, layout, leaf);
+    if (!rects) {
+        return std::nullopt;
+    }
+    return canvas_rect_to_screen(state, rects->pane);
 }
 
 void draw_focus_overlay(PluginState &state) {
@@ -579,13 +603,13 @@ bool apply_drag_selection(PluginState &state, const Box &box, bool reset) {
         return set_focused_region(layout, Region{});
     }
 
-    std::vector<int> leaves = leaf_order(layout);
-    std::vector<PixelRect> rects = compute_pane_rects(layout, size->canvas_w, size->canvas_h);
-    auto it = std::find(leaves.begin(), leaves.end(), hit->leaf);
-    if (it == leaves.end() || leaves.size() != rects.size()) {
+    auto rects = pane_canvas_rects(state, layout, hit->leaf);
+    if (!rects) {
         return false;
     }
-    const PixelRect &rect = rects[static_cast<std::size_t>(it - leaves.begin())];
+    // 用**内容矩形**而不是整个窗格：保比缩放之后画面只占窗格的一部分，其余
+    // 是黑边。按整个窗格换算的话，框选位置会被整体算偏——黑边越宽偏得越多。
+    const PixelRect &rect = rects->content;
     if (rect.w <= 0 || rect.h <= 0) {
         return false;
     }
@@ -630,7 +654,10 @@ void drag_begin(PluginState &state) {
             double cv = (pos->y - geometry->rect_y) / geometry->scaled_h;
             if (auto hit = hit_test(layout, size->canvas_w, size->canvas_h, std::clamp(cu, 0.0, 1.0),
                                      std::clamp(cv, 0.0, 1.0))) {
-                state.drag_bounds = pane_screen_rect(state, layout, hit->leaf);
+                // 限制到**内容矩形**：黑边上没有画面，不该能框出东西。
+                if (auto rects = pane_canvas_rects(state, layout, hit->leaf)) {
+                    state.drag_bounds = canvas_rect_to_screen(state, rects->content);
+                }
                 state.drag_start.x = std::clamp(state.drag_start.x, state.drag_bounds->x1,
                                                  state.drag_bounds->x2);
                 state.drag_start.y = std::clamp(state.drag_start.y, state.drag_bounds->y1,

@@ -86,6 +86,13 @@ std::vector<PixelRect> compute_pane_rects(const Layout &layout, int canvas_w, in
 std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h,
                                 bool hardware_frames = false);
 
+// 窗格里**实际画面**所占的矩形——保比缩放（force_original_aspect_ratio）
+// 之后，画面只占窗格的一部分，其余是 pad 出来的黑边。
+//
+// 坐标反查必须用这个矩形而不是整个窗格：黑边上没有画面，按整个窗格算会把
+// 框选位置整体算偏。它同时也用来限制拖拽范围——黑边上不该能框出东西。
+PixelRect pane_content_rect(const Region &region, int src_w, int src_h, const PixelRect &pane);
+
 struct PaneHit {
     int leaf = -1;  // 命中的叶子节点索引
     double u = 0.0; // 窗格内归一化坐标

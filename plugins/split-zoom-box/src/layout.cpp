@@ -279,6 +279,20 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
     return graph;
 }
 
+PixelRect pane_content_rect(const Region &region, int src_w, int src_h, const PixelRect &pane) {
+    if (pane.w <= 0 || pane.h <= 0 || src_w <= 0 || src_h <= 0) {
+        return pane;
+    }
+    CropParams crop = region_to_crop(region, src_w, src_h);
+    // 与滤镜里 scale=...:force_original_aspect_ratio=decrease 的算法保持一致：
+    // 两个轴各自需要的缩放比取较小的那个，保证整块内容都进得去。
+    double scale = std::min(static_cast<double>(pane.w) / crop.w, static_cast<double>(pane.h) / crop.h);
+    int w = std::clamp(static_cast<int>(std::lround(crop.w * scale)), 1, pane.w);
+    int h = std::clamp(static_cast<int>(std::lround(crop.h * scale)), 1, pane.h);
+    // 居中方式与 pad=...:(ow-iw)/2:(oh-ih)/2 一致（整数除法，偏左上）。
+    return PixelRect{pane.x + (pane.w - w) / 2, pane.y + (pane.h - h) / 2, w, h};
+}
+
 std::optional<PaneHit> hit_test(const Layout &layout, int canvas_w, int canvas_h, double cu, double cv) {
     if (cu < 0.0 || cu > 1.0 || cv < 0.0 || cv > 1.0) {
         return std::nullopt;

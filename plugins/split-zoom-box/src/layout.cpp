@@ -552,6 +552,28 @@ std::optional<std::size_t> overlapping_segment(const std::vector<LayoutSegment> 
     return std::nullopt;
 }
 
+std::optional<std::size_t> divide_segment_at(std::vector<LayoutSegment> &segments, double pos) {
+    auto index = find_segment_at(segments, pos);
+    if (!index) {
+        return std::nullopt;
+    }
+    LayoutSegment &front = segments[*index];
+    if (pos - front.a < kMinSegmentDuration || front.b - pos < kMinSegmentDuration) {
+        return std::nullopt;
+    }
+
+    LayoutSegment back;
+    back.a = pos;
+    back.b = front.b;
+    back.layout = front.layout;
+    front.b = pos;
+    // 直接插在原段后面，不重新排序：段之间互不重叠、pos 严格在 (a,b) 内，
+    // 所以 [a,pos] / [pos,b] 这个顺序本身就满足"按起点升序"。
+    std::size_t back_index = *index + 1;
+    segments.insert(segments.begin() + static_cast<std::ptrdiff_t>(back_index), std::move(back));
+    return back_index;
+}
+
 Region subregion(const Region &pane, double u1, double v1, double u2, double v2) {
     double lo_u = std::min(u1, u2);
     double hi_u = std::max(u1, u2);

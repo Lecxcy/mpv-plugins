@@ -1314,6 +1314,39 @@ void on_segment_from_abloop(PluginState &state) {
                                kOsdDuration);
 }
 
+// 把当前所在的分屏段以播放位置为分割点切成前后两半，两半先继承同一份布局，
+// 之后可以分别改。相当于"设起点/设终点"的逆操作：先划一个大段、播到想分家的
+// 地方一按，比退回去重设两组端点省事得多。
+//
+// 刻意只切**当前所在**的段，不接受"在段外按就切最近的段"这种猜测：段外按键
+// 时用户的意图更可能是建新段（Alt+,），猜错会静默改掉一个他没在看的段。
+void on_segment_divide(PluginState &state) {
+    double pos = time_pos(state.handle);
+    if (!find_segment_at(state.segments, pos)) {
+        mpv_util::show_osd_message(state.handle, "No split segment here", kOsdDuration);
+        return;
+    }
+    auto back = divide_segment_at(state.segments, pos);
+    if (!back) {
+        // 走到这里只剩"离某个端点太近"一种可能。
+        mpv_util::show_osd_message(state.handle, "Too close to the segment edge: denied", kOsdDuration);
+        return;
+    }
+
+    publish_segments_property(state.handle, state.segments);
+    // 刻意**不** force：两半的布局与原段完全相同，画面不该有任何变化，强制重建
+    // 只会换来一次没必要的滤镜重配（那是肉眼能看到的一下闪动）。applied_key 是
+    // 从布局内容算的、不含段下标，所以去重守卫在这里正好该生效。
+    refresh(state);
+    const LayoutSegment &front = state.segments[*back - 1];
+    const LayoutSegment &tail = state.segments[*back];
+    mpv_util::show_osd_message(state.handle,
+                               fmt::format("Split segment divided at {}: [{} - {}] + [{} - {}] ({} total)",
+                                            format_precise(pos), format_time(front.a), format_time(front.b),
+                                            format_time(tail.a), format_time(tail.b), state.segments.size()),
+                               kOsdDuration);
+}
+
 void on_segment_clear(PluginState &state) {
     double pos = time_pos(state.handle);
     if (auto index = find_segment_at(state.segments, pos)) {
@@ -1560,6 +1593,8 @@ void handle_client_message(PluginState &state, mpv_event_client_message *message
         on_segment_start(state);
     } else if (binding == "segment-end") {
         on_segment_end(state);
+    } else if (binding == "segment-divide") {
+        on_segment_divide(state);
     } else if (binding == "show-state") {
         on_show_state(state);
     } else if (binding == "segment-clear") {

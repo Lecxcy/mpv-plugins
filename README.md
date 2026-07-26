@@ -133,10 +133,48 @@ scripts/collect-dist.sh build dist # 等价的显式写法
 mpv --config-dir="$(pwd)/dist" <媒体文件>
 ```
 
-或者把 `dist/` 下的内容复制进 `~/.config/mpv/`（注意会覆盖同名文件）。生成的
+或者用 `scripts/install-config.sh` 装进 `~/.config/mpv/`（见下一节）。生成的
 `mpv.conf` 里插件路径统一用 mpv 的 `~~home/` 元路径写成
 `scripts-append=~~home/...`，指向"当前生效的配置目录"，所以整个 `dist/`
 目录可以随意移动或复制，不依赖生成时的绝对路径。
+
+## 安装到本机 mpv
+
+```sh
+cmake --build build            # 1. 编译
+scripts/collect-dist.sh        # 2. 收集到 dist/
+scripts/install-config.sh      # 3. 装进 ~/.config/mpv（-n 先看改动，-y 免确认）
+```
+
+`install-config.sh` 只接管 `input.conf`、`mpv.conf` 和
+`plugins/ scripts/ script-opts/ fonts/` 四个目录，其中目录是**整体替换**——
+这样删掉或改名的插件才会跟着消失，不会留下旧的同名 Lua 脚本被 mpv 自动加载、
+和已重写成 C++ 的版本抢同一批快捷键。配置目录里的运行时状态
+（`watch_later/`、`loop-segments/`、`split-layouts/`）不在管理范围内，不会被删。
+
+也正因为状态写在配置目录里，**不要把 `~/.config/mpv` 软链到 `dist/`**：
+`collect-dist.sh` 每次都会 `rm -rf dist/`，会把这些状态一起清掉。
+
+### macOS：让视频默认用 mpv 打开
+
+macOS 只允许 `.app` 充当文件的默认打开方式，命令行版 mpv 没法直接设。
+`scripts/make-macos-app.sh` 用 mpv 上游自带的 bundle 骨架
+（`external/mpv/TOOLS/osxbundle/mpv.app`，需要先初始化 submodule）把
+Homebrew 装的 mpv 包成 `~/Applications/mpv.app`：
+
+```sh
+scripts/make-macos-app.sh              # 默认 ~/Applications/mpv.app
+```
+
+之后在访达里"显示简介 → 打开方式 → mpv → 全部更改"即可。这个 bundle 走的是
+mpv 自己的 macOS 集成（`MPVBUNDLE=true`），所以多选打开会合成同一条播放
+列表而不是起多个进程，双击应用本身会进 `pseudo-gui` 待机窗口，也有"打开
+最近使用"和文档图标。用户配置目录仍然是 `~/.config/mpv`。
+
+两个踩过的坑写在脚本注释里：`Contents/MacOS/mpv` 必须是真实文件（软链到
+Homebrew 的话 LaunchServices 会静默拒绝启动），`Info.plist` 的 `LSEnvironment`
+里不能加自定义变量（加了同样会静默启动失败）。`brew upgrade mpv` 之后要重新
+跑一次脚本。
 
 ## 开发约定
 

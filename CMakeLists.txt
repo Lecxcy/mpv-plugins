@@ -50,6 +50,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# shared/ 里的纯逻辑（目前只有 confirm_lockout.h 的命令串拆分）也要有测试。
+add_subdirectory(shared/tests)
+
 # 显式添加 C++ 插件；纯 Lua 插件不参与 CMake 构建。
 add_subdirectory(plugins/enhanced-rotation)
 add_subdirectory(plugins/split-zoom-box)

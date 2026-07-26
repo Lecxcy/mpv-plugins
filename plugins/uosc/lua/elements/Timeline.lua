@@ -317,65 +317,109 @@ function Timeline:render()
 		ass:rect(rax, fay, rbx, fby, {color = chapter_range.color, opacity = chapter_range.opacity})
 	end
 
-	-- enhanced-ab-loop segments (bottom layer) + split-zoom-box segments (top
-	-- layer). When split segments exist the two share the bar height so both
-	-- stay readable; with none, ab-loop keeps the full height exactly as
-	-- before, so ab-loop-only usage is unaffected. The split is proportional
-	-- to whatever height the bar currently has, so it also works while the
-	-- timeline is collapsed to the thin progress bar (each layer just gets
-	-- half of those few pixels).
-	-- Only split the height when **both** kinds are present and the bar is tall
-	-- enough to make two layers readable. With only one kind it keeps the full
-	-- height, and while the timeline is collapsed to the thin progress bar the
-	-- two just overlay each other (they're semi-transparent, so overlaps blend)
-	-- -- two 1px stripes there looked bad and told you nothing.
+	-- enhanced-ab-loop segments + split-zoom-box segments.
+	--
+	-- Layout rules:
+	--  * both kinds present AND the bar is tall enough -> stack them, split
+	--    segments on top, ab-loop below, each getting exactly half the height
+	--    (the midpoint is rounded so both halves are whole pixels -- a
+	--    fractional midpoint leaves a blended row that makes one band read as
+	--    thinner than the other);
+	--  * otherwise (only one kind, or collapsed to the thin progress bar) each
+	--    spans the full height, and overlapping stretches are drawn **once** in
+	--    the mix of the two colors rather than as two translucent rects stacked
+	--    on each other -- stacking muddies into whatever was drawn last and
+	--    reads as a rendering glitch.
+	--
+	-- Segment ranges are drawn independently of whether the native loop is
+	-- currently on/off (`state.loop_enabled`/`ab-loop-a`/`ab-loop-b` are
+	-- irrelevant here on purpose -- disabling the master loop switch shouldn't
+	-- hide the ranges, it only stops mpv from enforcing them). "Active"
+	-- (playhead currently inside the range) gets a brighter fill + border,
+	-- computed from `state.time` directly so it still lights up while the
+	-- master loop switch is off.
 	local has_ab, has_split = #state.ab_loop_segments > 0, #state.split_zoom_segments > 0
 	local layered = has_ab and has_split and (fby - fay) >= 8 * state.scale
-	local ab_ay, ab_by = fay, fby
-	local sz_ay, sz_by = fay, fby
-	if layered then
-		local mid = fay + (fby - fay) / 2
-		sz_ay, sz_by = fay, mid   -- split segments on top
-		ab_ay, ab_by = mid, fby   -- ab-loop below
+
+	local function seg_x(a, b)
+		local rax = a < 0.1 and bax or t2x(a)
+		local rbx = b > state.duration - 0.1 and bbx or t2x(math.min(b, state.duration))
+		return rax, rbx
 	end
 
-	-- Each segment's own range gets a solid color fill, independent of whether
-	-- the native loop is currently on/off (`state.loop_enabled`/`ab-loop-a`/
-	-- `ab-loop-b` are irrelevant here on purpose -- disabling the master loop
-	-- switch shouldn't hide the ranges, it only stops mpv from enforcing them).
-	-- "Active" (playhead currently inside this enabled segment) gets a brighter
-	-- fill + border; this is computed from `state.time` directly rather than
-	-- matching `ab-loop-a`, so it still lights up even while the master loop
-	-- switch is off.
-	for _, segment in ipairs(state.ab_loop_segments) do
-		local rax = segment.a < 0.1 and bax or t2x(segment.a)
-		local rbx = segment.b > state.duration - 0.1 and bbx or t2x(math.min(segment.b, state.duration))
-		if segment.enabled then
-			local is_active = state.time and state.time >= segment.a and state.time < segment.b
-			ass:rect(rax, ab_ay, rbx, ab_by, {
-				color = config.color.success,
-				opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
-				border = is_active and 1 or 0,
-				border_color = fg,
-			})
-		else
-			ass:rect(rax, ab_ay, rbx, ab_by, {color = fg, opacity = 0.12})
-		end
-	end
-
-	-- split-zoom-box segments. Different color from ab-loop (match = blue) so
-	-- the two layers are told apart by hue, not just position; same
-	-- active-highlight treatment so both read the same way.
-	for _, segment in ipairs(state.split_zoom_segments) do
-		local rax = segment.a < 0.1 and bax or t2x(segment.a)
-		local rbx = segment.b > state.duration - 0.1 and bbx or t2x(math.min(segment.b, state.duration))
-		local is_active = state.time and state.time >= segment.a and state.time < segment.b
-		ass:rect(rax, sz_ay, rbx, sz_by, {
-			color = config.color.match,
+	local function draw_range(a, b, ay, by, color)
+		local rax, rbx = seg_x(a, b)
+		local is_active = state.time and state.time >= a and state.time < b
+		ass:rect(rax, ay, rbx, by, {
+			color = color,
 			opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
 			border = is_active and 1 or 0,
 			border_color = fg,
 		})
+	end
+
+	-- Disabled ab-loop segments are just a faint gray stripe; they never take
+	-- part in the color mixing below.
+	for _, segment in ipairs(state.ab_loop_segments) do
+		if not segment.enabled then
+			local rax, rbx = seg_x(segment.a, segment.b)
+			ass:rect(rax, fay, rbx, fby, {color = fg, opacity = 0.12})
+		end
+	end
+
+	if layered then
+		local mid = fay + round((fby - fay) / 2)
+		for _, segment in ipairs(state.ab_loop_segments) do
+			if segment.enabled then draw_range(segment.a, segment.b, mid, fby, config.color.success) end
+		end
+		for _, segment in ipairs(state.split_zoom_segments) do
+			draw_range(segment.a, segment.b, fay, mid, config.color.match)
+		end
+	else
+		-- Average the two colors channel-wise. uosc colors are plain hex
+		-- strings, so this works whatever channel order they're in.
+		local function mix(c1, c2)
+			local out = ''
+			for i = 1, 5, 2 do
+				local a, b = tonumber(c1:sub(i, i + 1), 16) or 0, tonumber(c2:sub(i, i + 1), 16) or 0
+				out = out .. string.format('%02x', math.floor((a + b) / 2))
+			end
+			return out
+		end
+		local mixed = mix(config.color.success, config.color.match)
+
+		-- Cut both lists into elementary, non-overlapping intervals so every
+		-- stretch is painted exactly once.
+		local points = {}
+		local function add_point(v) points[#points + 1] = v end
+		for _, s in ipairs(state.ab_loop_segments) do
+			if s.enabled then add_point(s.a) add_point(s.b) end
+		end
+		for _, s in ipairs(state.split_zoom_segments) do add_point(s.a) add_point(s.b) end
+		table.sort(points)
+
+		for i = 1, #points - 1 do
+			local a, b = points[i], points[i + 1]
+			if b - a > 1e-6 then
+				local probe = (a + b) / 2
+				local in_ab, in_sz = false, false
+				for _, s in ipairs(state.ab_loop_segments) do
+					if s.enabled and probe >= s.a and probe < s.b then in_ab = true break end
+				end
+				for _, s in ipairs(state.split_zoom_segments) do
+					if probe >= s.a and probe < s.b then in_sz = true break end
+				end
+				local color = nil
+				if in_ab and in_sz then
+					color = mixed
+				elseif in_ab then
+					color = config.color.success
+				elseif in_sz then
+					color = config.color.match
+				end
+				if color then draw_range(a, b, fay, fby, color) end
+			end
+		end
 	end
 
 	-- Chapters

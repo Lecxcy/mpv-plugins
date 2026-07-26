@@ -195,4 +195,20 @@ SegmentDisplayPlan plan_segment_display(std::size_t total, std::size_t max_visib
 std::optional<std::size_t> overlapping_segment(const std::vector<LayoutSegment> &segments, double a, double b,
                                                 std::optional<std::size_t> ignore_index = std::nullopt);
 
+// 切出来的每一半至少要有这么长。真正必须挡住的只是"长度 <= 0 的半段"，但边界
+// 附近按键会切出比一帧还短的段——那种段在正常播放下 time-pos 回调都不一定落进去
+// 一次，用户也没法 seek 进去编辑，等于凭空多一条永远不生效的记录。
+inline constexpr double kMinSegmentDuration = 0.05;
+
+// 把 pos 所在的分屏段以 pos 为分割点切成前后两半：[a,pos] 和 [pos,b]，两半各自
+// **拷贝**原段的布局（切完看到的画面不变，之后可以分别改）。返回后半段的下标。
+//
+// pos 不在任何段内、或者切出来的任一半短于 kMinSegmentDuration 时返回 nullopt，
+// 且 segments 完全不变。
+//
+// 分割点 pos 归两半**共有**（都是闭区间）：overlapping_segment 本来就允许首尾
+// 相接，不需要为此挑一个 epsilon 去把两半掰开——那个 epsilon 会变成又一个要跟
+// 帧长、seek 精度对齐的魔数。pos 处 find_segment_at 命中前半段（它先出现）。
+std::optional<std::size_t> divide_segment_at(std::vector<LayoutSegment> &segments, double pos);
+
 } // namespace split_zoom_box

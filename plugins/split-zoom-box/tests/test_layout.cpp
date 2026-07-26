@@ -446,3 +446,106 @@ TEST_CASE("set_focused_region 拒绝退化视口但允许越界", "[layout][view
     // 但离谱的量级仍然挡掉
     REQUIRE_FALSE(set_focused_region(layout, Region{0.0, 0.0, 100.0, 1.0}));
 }
+
+namespace {
+
+// 造一个能一眼认出来的段：布局的窗格数当指纹，用来验证两半确实各自拷了一份。
+LayoutSegment make_segment(double a, double b, int splits) {
+    LayoutSegment seg;
+    seg.a = a;
+    seg.b = b;
+    // LayoutSegment 默认构造出来的 Layout 是空 nodes（不是单窗格），实际用法里
+    // 总是从 active_layout 拷一份真实布局进来，这里也得显式建一个。
+    seg.layout = make_layout();
+    for (int i = 0; i < splits; ++i) {
+        REQUIRE(split_focused(seg.layout, SplitDir::kHorizontal));
+    }
+    return seg;
+}
+
+} // namespace
+
+TEST_CASE("divide_segment_at 以播放位置把段切成前后两半", "[layout][segment][divide]") {
+    std::vector<LayoutSegment> segments{make_segment(5.0, 15.0, 1), make_segment(20.0, 30.0, 2)};
+
+    auto back = divide_segment_at(segments, 8.0);
+    REQUIRE(back);
+    REQUIRE(*back == 1);
+    REQUIRE(segments.size() == 3);
+
+    // 前半 [5,8]、后半 [8,15]，分割点是两半共有的边界，后面的段整个不受影响。
+    REQUIRE(segments[0].a == Catch::Approx(5.0));
+    REQUIRE(segments[0].b == Catch::Approx(8.0));
+    REQUIRE(segments[1].a == Catch::Approx(8.0));
+    REQUIRE(segments[1].b == Catch::Approx(15.0));
+    REQUIRE(segments[2].a == Catch::Approx(20.0));
+    REQUIRE(segments[2].b == Catch::Approx(30.0));
+
+    // 排序不变量（起点升序）不用再调 sort_segments 就已经成立。
+    std::vector<LayoutSegment> sorted = segments;
+    sort_segments(sorted);
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        REQUIRE(sorted[i].a == Catch::Approx(segments[i].a));
+    }
+
+    // 互不重叠：首尾相接是允许的形状，divide 不该造出真正的重叠。
+    REQUIRE_FALSE(overlapping_segment(segments, segments[0].a, segments[0].b, 0));
+    REQUIRE_FALSE(overlapping_segment(segments, segments[1].a, segments[1].b, 1));
+
+    // 两半各拿到一份原布局的拷贝，改一边不影响另一边。
+    REQUIRE(leaf_count(segments[0].layout) == 2);
+    REQUIRE(leaf_count(segments[1].layout) == 2);
+    REQUIRE(split_focused(segments[1].layout, SplitDir::kVertical));
+    REQUIRE(leaf_count(segments[1].layout) == 3);
+    REQUIRE(leaf_count(segments[0].layout) == 2);
+}
+
+TEST_CASE("divide_segment_at 拒绝段外和贴边的分割点", "[layout][segment][divide]") {
+    std::vector<LayoutSegment> segments{make_segment(5.0, 15.0, 1)};
+    const std::vector<LayoutSegment> before = segments;
+
+    auto unchanged = [&]() {
+        REQUIRE(segments.size() == before.size());
+        REQUIRE(segments[0].a == Catch::Approx(before[0].a));
+        REQUIRE(segments[0].b == Catch::Approx(before[0].b));
+    };
+
+    REQUIRE_FALSE(divide_segment_at(segments, 2.0)); // 段前
+    unchanged();
+    REQUIRE_FALSE(divide_segment_at(segments, 20.0)); // 段后
+    unchanged();
+    // 两个端点本身：闭区间意义上"在段内"，但会切出零长的一半。
+    REQUIRE_FALSE(divide_segment_at(segments, 5.0));
+    unchanged();
+    REQUIRE_FALSE(divide_segment_at(segments, 15.0));
+    unchanged();
+    // 贴边但严格在内部：比一帧还短的段没有意义，同样拒绝。
+    REQUIRE_FALSE(divide_segment_at(segments, 5.0 + kMinSegmentDuration / 2.0));
+    unchanged();
+    REQUIRE_FALSE(divide_segment_at(segments, 15.0 - kMinSegmentDuration / 2.0));
+    unchanged();
+    // 稍微离开下限就放行。刻意不断言"恰好等于 kMinSegmentDuration"这个点：
+    // 5.0 + 0.05 在二进制里落到 5.04999999999999982，写成等号的用例只是在考
+    // 浮点舍入方向，不是在考这条规则。
+    REQUIRE(divide_segment_at(segments, 5.0 + kMinSegmentDuration * 2.0));
+    REQUIRE(segments.size() == 2);
+    REQUIRE(segments[0].b == Catch::Approx(5.0 + kMinSegmentDuration * 2.0));
+}
+
+TEST_CASE("divide_segment_at 切出来的两半都能继续再切", "[layout][segment][divide]") {
+    std::vector<LayoutSegment> segments{make_segment(0.0, 12.0, 0)};
+    REQUIRE(divide_segment_at(segments, 6.0));
+    REQUIRE(divide_segment_at(segments, 3.0));  // 切前半
+    REQUIRE(divide_segment_at(segments, 9.0));  // 切后半
+    REQUIRE(segments.size() == 4);
+
+    const double bounds[5] = {0.0, 3.0, 6.0, 9.0, 12.0};
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        REQUIRE(segments[i].a == Catch::Approx(bounds[i]));
+        REQUIRE(segments[i].b == Catch::Approx(bounds[i + 1]));
+    }
+    // 分割点归前一半：find_segment_at 在边界上命中的是先出现的那个。
+    REQUIRE(find_segment_at(segments, 6.0) == std::size_t{1});
+    REQUIRE(find_segment_at(segments, 4.0) == std::size_t{1});
+    REQUIRE(find_segment_at(segments, 7.0) == std::size_t{2});
+}

@@ -17,6 +17,7 @@
 
 #include "enhanced_ab_loop/logic.h"
 #include "enhanced_ab_loop/store.h"
+#include "shared/cpp/confirm_lockout.h"
 #include "shared/cpp/mpv_util.h"
 
 namespace {
@@ -35,6 +36,8 @@ constexpr double kConfirmOsdDurationSeconds = 24.0 * 3600.0;
 constexpr const char *kVideoFilterLabel = "enhanced-ab-loop-tail-video";
 constexpr const char *kAudioFilterLabel = "enhanced-ab-loop-tail-audio";
 constexpr const char *kConfirmSectionName = "enhanced_ab_loop_confirm";
+constexpr const char *kConfirmYesBinding = "enhanced_ab_loop/confirm-yes";
+constexpr const char *kConfirmNoBinding = "enhanced_ab_loop/confirm-no";
 constexpr std::size_t kContentSampleBytes = 65536;
 
 struct PluginState {
@@ -720,81 +723,12 @@ void on_template_delete(PluginState &state, int slot) {
         kToggleOsdDuration);
 }
 
-// mpv 没有原生弹窗，光靠"抢占 confirm-yes/confirm-no 两个 binding 名字"并
-// 不能阻止用户在看清提示之前误按别的键做出其他编辑操作。这里用
-// `define-section` + `enable-section ... exclusive` 把正常输入完全遮住，
-// 只放行 confirm-yes/confirm-no 实际绑定的物理按键——这正是 mpv 自己的
-// Lua `mp.add_forced_key_binding`/console.lua 实现"独占键盘"的同一套机制
-// （`player/lua/defaults.lua` 的 `mp.input_define_section`/
-// `mp.input_enable_section` 只是这几个 command 的薄包装），C 插件没有那层
-// 封装，直接调 `mpv_command` 效果完全一样。
-//
-// 不硬编码 "y"/"n"：物理按键是用户在自己 input.conf 里配的，插件这边只知
-// 道 binding 名字。改用 `input-bindings` 属性反查实际绑定的物理键，跟用户
-// 自定义按键保持一致，也顺带覆盖了重复键位（比如 set-a 同时绑了 `[` 和
-// `【`，confirm-yes/no 理论上也可能这样重复绑定）。
-std::vector<std::string> keys_bound_to_script_binding(mpv_handle *h, const std::string &binding_name) {
-    std::vector<std::string> keys;
-    std::string needle = "script-binding " + binding_name;
-
-    mpv_node node;
-    if (mpv_get_property(h, "input-bindings", MPV_FORMAT_NODE, &node) < 0) {
-        return keys;
-    }
-    if (node.format == MPV_FORMAT_NODE_ARRAY) {
-        for (int i = 0; i < node.u.list->num; ++i) {
-            const mpv_node &item = node.u.list->values[i];
-            if (item.format != MPV_FORMAT_NODE_MAP) {
-                continue;
-            }
-            const mpv_node_list &map = *item.u.list;
-            const char *key = nullptr;
-            const char *cmd = nullptr;
-            for (int j = 0; j < map.num; ++j) {
-                if (std::strcmp(map.keys[j], "key") == 0 && map.values[j].format == MPV_FORMAT_STRING) {
-                    key = map.values[j].u.string;
-                } else if (std::strcmp(map.keys[j], "cmd") == 0 && map.values[j].format == MPV_FORMAT_STRING) {
-                    cmd = map.values[j].u.string;
-                }
-            }
-            if (key && cmd && needle == cmd) {
-                keys.emplace_back(key);
-            }
-        }
-    }
-    mpv_free_node_contents(&node);
-    return keys;
-}
-
-// 返回 false 表示当前找不到任何绑定到 confirm-yes/confirm-no 的物理按键
-// （用户把这两个 binding 从 input.conf 里删掉了）——这种情况下绝不能真的
-// 启用独占区段，否则会把用户锁死在一个连 y/n 都按不出来的暂停画面里，没
-// 有任何办法退出确认状态。宁可退化成"不锁键"，也不能造成死锁。
 bool engage_confirm_lockout(PluginState &state) {
-    std::vector<std::string> yes_keys = keys_bound_to_script_binding(state.handle, "enhanced_ab_loop/confirm-yes");
-    std::vector<std::string> no_keys = keys_bound_to_script_binding(state.handle, "enhanced_ab_loop/confirm-no");
-    if (yes_keys.empty() || no_keys.empty()) {
-        return false;
-    }
-
-    std::string contents;
-    for (const auto &key : yes_keys) {
-        contents += key + " script-binding enhanced_ab_loop/confirm-yes\n";
-    }
-    for (const auto &key : no_keys) {
-        contents += key + " script-binding enhanced_ab_loop/confirm-no\n";
-    }
-    // "unmapped" 是 input.conf 的特殊键名，匹配区段里没有单独绑定的任何键
-    // （含鼠标/滚轮），`ignore` 是 mpv 自带的"吃掉这个按键，什么都不做"。
-    contents += "unmapped ignore\n";
-
-    run_command(state.handle, {"define-section", kConfirmSectionName, contents.c_str(), "force"});
-    run_command(state.handle, {"enable-section", kConfirmSectionName, "exclusive"});
-    return true;
+    return mpv_util::engage_confirm_lockout(state.handle, kConfirmSectionName, kConfirmYesBinding, kConfirmNoBinding);
 }
 
 void release_confirm_lockout(PluginState &state) {
-    run_command(state.handle, {"disable-section", kConfirmSectionName});
+    mpv_util::release_confirm_lockout(state.handle, kConfirmSectionName);
 }
 
 void on_save_loops(PluginState &state) {

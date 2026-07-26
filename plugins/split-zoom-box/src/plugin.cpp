@@ -13,6 +13,7 @@
 
 #include <fmt/core.h>
 
+#include "shared/cpp/confirm_lockout.h"
 #include "shared/cpp/mpv_util.h"
 #include "split_zoom_box/layout.h"
 #include "split_zoom_box/store.h"
@@ -45,6 +46,9 @@ constexpr int kOverlayZ = 1000;
 constexpr const char *kFilterLabel = "split-zoom-box";
 constexpr double kOsdDuration = 1.6;
 constexpr double kConfirmOsdDuration = 24.0 * 3600.0;
+constexpr const char *kConfirmSectionName = "split_zoom_box_confirm";
+constexpr const char *kConfirmYesBinding = "split_zoom_box/confirm-yes";
+constexpr const char *kConfirmNoBinding = "split_zoom_box/confirm-no";
 constexpr std::size_t kContentSampleBytes = 65536;
 // 窗格再小就没有观察价值了，而且过小的 crop/scale 容易让滤镜图配置失败。
 constexpr int kMinPanePixels = 16;
@@ -1319,7 +1323,7 @@ void on_segment_from_abloop(PluginState &state) {
 // 地方一按，比退回去重设两组端点省事得多。
 //
 // 刻意只切**当前所在**的段，不接受"在段外按就切最近的段"这种猜测：段外按键
-// 时用户的意图更可能是建新段（Alt+,），猜错会静默改掉一个他没在看的段。
+// 时用户的意图更可能是建新段（Alt+[），猜错会静默改掉一个他没在看的段。
 void on_segment_divide(PluginState &state) {
     double pos = time_pos(state.handle);
     if (!find_segment_at(state.segments, pos)) {
@@ -1470,21 +1474,29 @@ void on_load(PluginState &state) {
         mpv_util::show_osd_message(state.handle, fmt::format("Split layouts loaded ({} segments)", state.segments.size()),
                                    kOsdDuration);
         break;
-    case store::LookupResult::Kind::kSingleCandidate:
+    case store::LookupResult::Kind::kSingleCandidate: {
         // 提示文案不带明文路径——插件这边也只有它的哈希。
         state.awaiting_confirm = true;
         state.pending_entry = result.entry;
         state.rename_from = result.matched_key;
         state.paused_before_confirm = mpv_util::get_flag(state.handle, "pause", false);
         mpv_util::set_flag(state.handle, "pause", true);
+        bool locked =
+            mpv_util::engage_confirm_lockout(state.handle, kConfirmSectionName, kConfirmYesBinding, kConfirmNoBinding);
         // 换行用真实的 '\n'，不是 ASS 的 "\N"：mpv 的 show-text 不解析 ASS
         // 转义，写 "\N" 会原样显示成反斜杠加 N（实测真实换行渲染成两行、
         // 字面 \N 只有一行）。enhanced-ab-loop 的 show-state 用的也是 '\n'。
-        mpv_util::show_osd_message(state.handle,
-                                   "Archive has one entry with a different filename (renamed?).\n"
-                                   "Alt+y to use it, Alt+n to cancel",
-                                   kConfirmOsdDuration);
+        //
+        // 文案只提 binding 名字、不写死 "y"/"n"：物理按键由用户的 input.conf
+        // 决定，跟 enhanced-ab-loop 的确认提示保持同一种写法。
+        std::string message = "Archive has one entry with a different filename (renamed?).\n"
+                              "Playback paused - confirm-yes to use it, confirm-no to cancel.";
+        if (locked) {
+            message += "\n(other keys are disabled until you answer)";
+        }
+        mpv_util::show_osd_message(state.handle, message, kConfirmOsdDuration);
         break;
+    }
     case store::LookupResult::Kind::kNoArchive:
         mpv_util::show_osd_message(state.handle, "No matching layouts", kOsdDuration);
         break;
@@ -1496,6 +1508,7 @@ void on_confirm(PluginState &state, bool yes) {
         return;
     }
     state.awaiting_confirm = false;
+    mpv_util::release_confirm_lockout(state.handle, kConfirmSectionName);
     mpv_util::set_flag(state.handle, "pause", state.paused_before_confirm);
     mpv_util::show_osd_message(state.handle, "", 1);
 
@@ -1513,6 +1526,13 @@ void on_confirm(PluginState &state, bool yes) {
 // ---- 事件 ----
 
 void on_file_loaded(PluginState &state) {
+    // 理论上确认锁键期间几乎不可能触发新文件加载，但外部 IPC 仍可能在这期间
+    // 发 loadfile/playlist-next；防御性地解除独占区段，避免残留下去把新文件的
+    // 正常操作也锁死。
+    if (state.awaiting_confirm) {
+        mpv_util::release_confirm_lockout(state.handle, kConfirmSectionName);
+    }
+
     state.current_path = get_string_property(state.handle, "path");
     state.current_path_key =
         state.current_path.empty() ? "" : store::compute_path_hash(store::extract_filename(state.current_path));

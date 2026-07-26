@@ -272,6 +272,36 @@ Disabling filter split-zoom-box because it has failed.
 会话里连着测多个变体，前面的用例会污染后面的前提。一条"我试过，不行"的结论
 如果建立在被污染的环境上，会把正确的方案排除掉——这次差点就是。
 
+### 6.9 yuv420p 的偶数对齐：奇数尺寸让 pad 直接失败
+
+**现象**（用户反馈）：框选区域较小时整个滤镜被禁用。
+```
+Parsed_pad_3: Padded dimensions cannot be smaller than input dimensions.
+[lavfi] failed to configure the filter graph
+Disabling filter split-zoom-box because it has failed.
+```
+
+**根因**：yuv420p 的色度平面是 2x2 子采样。`pad` 会先把自己的尺寸和偏移按 2
+**向下**对齐，再校验"padded >= input"——只要 `scale` 输出的是奇数（例如
+`scale=1337:720,pad=1337:720`），对齐后就可能反过来变小，校验失败。同理，
+高度为 1 的 `crop` 会让色度平面高度变成 0，报 "Invalid too big or non
+positive size"。
+
+**排查方式**：分析上一直推不出矛盾（`pad_w >= content_w` 在算术上恒成立），
+真正定位靠的是把公式原样搬进脚本、对上千组参数组合直接跑 ffmpeg，让机器把
+失败的那组打出来——`scale=1337:720` 一眼就能看出问题在奇数。
+
+**修复**：`crop` 的宽高与起点、缩放后的内容尺寸与摆放偏移、`pad` 的尺寸，
+全部对齐到偶数（尺寸向上取偶保证"填满"那一侧不露黑边，偏移向下取偶）；
+`crop` 宽高另外保证至少为 2。
+
+**顺带修掉的**：极端细长的选区（只有两三像素高）会让"填满"所需的倍率爆炸，
+算出几十万像素宽的中间帧——单个平面就是几百 MB。现在缩放比封顶 8192 像素，
+超过就按比例回退，退化成一个方向填不满、补黑边。
+
+**教训**：涉及像素格式的滤镜参数，不能只在算术上论证正确——子采样、对齐这些
+约束是滤镜内部隐式施加的，必须用真实的 ffmpeg 跑参数扫描来验证边界。
+
 ## 7. 已知限制（不是 bug）
 
 - 多窗格期间帧要经 `hwdownload` 回拷到系统内存，4K 高码率下可能有开销。
@@ -283,5 +313,7 @@ Disabling filter split-zoom-box because it has failed.
 - 窗格显示的是缩放后的源区域，放大倍数过高时清晰度受源分辨率限制。
 - 分屏时整块拼接画面不再叠加 `video-zoom`。
 - 分屏段之间不允许重叠。
+- 极端细长的选区（某一边只有两三像素）会因为缩放比封顶而在另一个方向补黑边，
+  不再"填满"。这种选区本来也没有观察价值。
 - 真实鼠标拖拽路径依赖 `mouse-pos`/`osd-dimensions`，`--vo=null` 下是哑值，
   无法在无 GUI 环境端到端验证，需要真机手测。

@@ -161,6 +161,42 @@ TEST_CASE("crop 参数落在源画面范围内且不为零", "[layout][graph]") 
     REQUIRE(graph.find(":0:") != std::string::npos); // 完整画面那格的 x 偏移是 0
 }
 
+TEST_CASE("摆放参数全部偶数对齐（yuv420p 回归）", "[layout][graph][even]") {
+    // yuv420p 色度 2x2 子采样：pad 会把尺寸按 2 对齐后再校验 padded >= input，
+    // 出现奇数就报 "Padded dimensions cannot be smaller than input dimensions"；
+    // 高度为 1 的 crop 则让色度平面高度变成 0。所以 crop/scale/pad 的尺寸与
+    // 偏移必须全是偶数、且不小于 2。
+    for (double w : {0.02, 0.005, 0.3, 0.0008}) {
+        for (double h : {0.02, 0.002, 0.3}) {
+            Layout layout = make_layout();
+            REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+            REQUIRE(set_focused_region(layout, Region{0.3, 0.3, 0.3 + w, 0.3 + h}));
+            std::vector<PixelRect> panes = compute_pane_rects(layout, 1280, 720);
+            PanePlacement p = compute_placement(layout.nodes[leaf_order(layout)[0]].region, 0.0, 0.0, 1280,
+                                                 720, panes[0]);
+            REQUIRE(p.content_w % 2 == 0);
+            REQUIRE(p.content_h % 2 == 0);
+            REQUIRE(p.content_x % 2 == 0);
+            REQUIRE(p.content_y % 2 == 0);
+            REQUIRE(p.content_w >= 2);
+            REQUIRE(p.content_h >= 2);
+            // 缩放比封顶：不能算出几十万像素宽的中间帧
+            REQUIRE(p.content_w <= 8192);
+            REQUIRE(p.content_h <= 8192);
+        }
+    }
+}
+
+TEST_CASE("窗格小于 2 像素时不下发滤镜图", "[layout][graph]") {
+    // 1 像素宽的窗格在 yuv420p 下必然让最后的 crop 失败，宁可不下发
+    Layout layout = make_layout();
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+    REQUIRE(build_filter_graph(layout, 1280, 720, 2, 720).empty());
+    REQUIRE(build_filter_graph(layout, 1280, 720, 640, 1).empty());
+    // 正常尺寸照常产出
+    REQUIRE_FALSE(build_filter_graph(layout, 1280, 720, 1280, 720).empty());
+}
+
 TEST_CASE("hit_test 命中正确窗格并给出窗格内坐标", "[layout][hit]") {
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kHorizontal));

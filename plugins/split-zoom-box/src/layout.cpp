@@ -44,8 +44,24 @@ int clamp_positive(int value) {
     return value < 1 ? 1 : value;
 }
 
-// 把区域换算成 crop 的整数参数，并夹回源画面范围内。crop 的宽高至少为 1，
-// 否则滤镜图会配置失败。
+// yuv420p 的色度是 2x2 子采样，pad 会把尺寸和偏移按 2 对齐之后再做
+// "padded >= input" 的校验；只要有一个是奇数，对齐后就可能反过来变小，
+// 整张图直接配置失败（实测 scale=1337:720,pad=1337:720 就会报
+// "Padded dimensions cannot be smaller than input dimensions"）。
+// 所以摆放相关的尺寸和偏移一律取偶。
+int even_floor(int value) {
+    return static_cast<int>(std::floor(value / 2.0)) * 2;
+}
+
+int even_ceil(int value) {
+    return static_cast<int>(std::ceil(value / 2.0)) * 2;
+}
+
+// 把区域换算成 crop 的整数参数，并夹回源画面范围内。
+//
+// 宽高和起点都取偶、且至少为 2：yuv420p 的色度平面是 2x2 子采样，高度 1 的
+// 裁剪会让色度平面高度变成 0，crop 直接报 "Invalid too big or non positive
+// size"。
 struct CropParams {
     int x = 0;
     int y = 0;
@@ -55,20 +71,28 @@ struct CropParams {
 
 CropParams region_to_crop(const Region &region, int src_w, int src_h) {
     CropParams crop;
+    if (src_w < 2 || src_h < 2) {
+        return crop;
+    }
     int x1 = static_cast<int>(std::lround(region.x1 * src_w));
     int y1 = static_cast<int>(std::lround(region.y1 * src_h));
     int x2 = static_cast<int>(std::lround(region.x2 * src_w));
     int y2 = static_cast<int>(std::lround(region.y2 * src_h));
 
-    x1 = std::clamp(x1, 0, std::max(0, src_w - 1));
-    y1 = std::clamp(y1, 0, std::max(0, src_h - 1));
-    x2 = std::clamp(x2, x1 + 1, src_w);
-    y2 = std::clamp(y2, y1 + 1, src_h);
+    x1 = even_floor(std::clamp(x1, 0, src_w - 2));
+    y1 = even_floor(std::clamp(y1, 0, src_h - 2));
+    x2 = std::clamp(x2, x1 + 2, src_w);
+    y2 = std::clamp(y2, y1 + 2, src_h);
+
+    int w = even_floor(x2 - x1);
+    int h = even_floor(y2 - y1);
+    w = std::clamp(w, 2, even_floor(src_w - x1));
+    h = std::clamp(h, 2, even_floor(src_h - y1));
 
     crop.x = x1;
     crop.y = y1;
-    crop.w = clamp_positive(x2 - x1);
-    crop.h = clamp_positive(y2 - y1);
+    crop.w = std::max(2, w);
+    crop.h = std::max(2, h);
     return crop;
 }
 
@@ -222,6 +246,15 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
     if (rects.size() != leaves.size()) {
         return {};
     }
+    // 窗格窄到只剩 1 像素时，yuv420p 的色度平面宽/高会变成 0，最后那个 crop
+    // 直接报 "Invalid too big or non positive size"。plugin.cpp 里的
+    // kMinPanePixels 已经挡住了这种分屏，这里再兜一道：宁可不下发也不要下发
+    // 一张必然失败的图。
+    for (const PixelRect &rect : rects) {
+        if (rect.w < 2 || rect.h < 2) {
+            return {};
+        }
+    }
 
     std::string graph;
 
@@ -252,8 +285,9 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
         int pad_t = std::max(0, place.content_y);
         int win_x = pad_l - place.content_x; // 恒 >= 0
         int win_y = pad_t - place.content_y;
-        int pad_w = std::max(place.content_w + pad_l, win_x + pw);
-        int pad_h = std::max(place.content_h + pad_t, win_y + ph);
+        // 向上取偶不会破坏 pad 的两个约束（>= 内容尺寸、>= 窗口右下边界）。
+        int pad_w = even_ceil(std::max(place.content_w + pad_l, win_x + pw));
+        int pad_h = even_ceil(std::max(place.content_h + pad_t, win_y + ph));
 
         graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{},pad={}:{}:{}:{}:black,"
                              "crop={}:{}:{}:{},setsar=1[p{}];",
@@ -304,11 +338,25 @@ PanePlacement compute_placement(const Region &region, double offset_x, double of
     // 未放大时完整画面按原比例整个显示（多余处补黑），放大后才占满窗格。
     double scale = region_is_full(region) ? fit : fill;
 
-    out.content_w = std::max(1, static_cast<int>(std::lround(crop.w * scale)));
-    out.content_h = std::max(1, static_cast<int>(std::lround(crop.h * scale)));
-    // 先居中，再叠加拖拽位移（按窗格尺寸归一化，不限制范围）。
-    out.content_x = (pane.w - out.content_w) / 2 + static_cast<int>(std::lround(offset_x * pane.w));
-    out.content_y = (pane.h - out.content_h) / 2 + static_cast<int>(std::lround(offset_y * pane.h));
+    // 缩放比封顶：极端细长的选区（比如只有两三像素高）会让"填满"所需的倍率
+    // 爆炸，算出几十万像素宽的中间帧——光一个平面就是几百 MB，滤镜要么失败
+    // 要么把内存打爆。超过上限时按比例回退，这种选区本来也没有观察价值，
+    // 退化成一个方向填不满、补黑边即可。
+    constexpr double kMaxContentDimension = 8192.0;
+    double cap = std::min(kMaxContentDimension / (crop.w * scale), kMaxContentDimension / (crop.h * scale));
+    if (cap < 1.0) {
+        scale *= cap;
+    }
+
+    // 尺寸向上取偶：向下取会让"填满"这一侧差 1 像素露出黑边。
+    out.content_w = std::max(2, even_ceil(static_cast<int>(std::lround(crop.w * scale))));
+    out.content_h = std::max(2, even_ceil(static_cast<int>(std::lround(crop.h * scale))));
+    // 先居中，再叠加拖拽位移（按窗格尺寸归一化，不限制范围）。偏移取偶，
+    // 差的那 1 像素肉眼不可见，但能让后面 pad 的参数全部保持偶数对齐。
+    out.content_x =
+        even_floor((pane.w - out.content_w) / 2 + static_cast<int>(std::lround(offset_x * pane.w)));
+    out.content_y =
+        even_floor((pane.h - out.content_h) / 2 + static_cast<int>(std::lround(offset_y * pane.h)));
     return out;
 }
 

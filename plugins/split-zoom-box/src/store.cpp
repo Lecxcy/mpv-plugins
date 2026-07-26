@@ -64,6 +64,7 @@ nlohmann::json node_to_json(const Layout &layout, int index) {
     }
     return {{"leaf", false},
             {"dir", node.dir == SplitDir::kHorizontal ? "h" : "v"},
+            {"ratio", node.ratio},
             {"children", nlohmann::json::array({node_to_json(layout, node.first),
                                                 node_to_json(layout, node.second)})}};
 }
@@ -90,6 +91,8 @@ int node_from_json(Layout &layout, const nlohmann::json &item) {
 
     node.leaf = false;
     node.dir = item.value("dir", std::string("h")) == "v" ? SplitDir::kVertical : SplitDir::kHorizontal;
+    // 老存档没有 ratio 字段，读回来就是默认的 0.5（等分），向后兼容。
+    node.ratio = std::clamp(item.value("ratio", 0.5), kMinSplitRatio, 1.0 - kMinSplitRatio);
     layout.nodes.push_back(node);
     int self = static_cast<int>(layout.nodes.size()) - 1;
     int first = node_from_json(layout, children[0]);
@@ -106,15 +109,15 @@ nlohmann::json layout_to_json(const Layout &layout) {
     return node_to_json(layout, 0);
 }
 
-// 焦点不持久化：它是编辑期状态，读档后统一落到第一个窗格上。
+// 焦点不持久化：它是编辑期状态。读档后不选中任何窗格——播放时不该有个橙框
+// 杵在画面上，真正开始编辑时才会选中。
 Layout layout_from_json(const nlohmann::json &item) {
     Layout layout;
     node_from_json(layout, item);
     if (layout.nodes.empty()) {
         return make_layout();
     }
-    std::vector<int> leaves = leaf_order(layout);
-    layout.focused = leaves.empty() ? 0 : leaves.front();
+    clear_focus(layout);
     return layout;
 }
 

@@ -327,6 +327,79 @@ TEST_CASE("关闭窗格后兄弟顶替父节点", "[layout]") {
     REQUIRE_FALSE(close_focused(layout));
 }
 
+TEST_CASE("分割比例可调且像素精确求和", "[layout][ratio]") {
+    Layout layout = make_layout();
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+    // 默认等分
+    std::vector<PixelRect> even = compute_pane_rects(layout, 1000, 400);
+    REQUIRE(even[0].w == 500);
+    REQUIRE(even[1].w == 500);
+
+    REQUIRE(set_node_ratio(layout, 0, 0.3));
+    std::vector<PixelRect> tuned = compute_pane_rects(layout, 1000, 400);
+    REQUIRE(tuned[0].w == 300);
+    REQUIRE(tuned[1].w == 700);
+    // 两侧之和仍精确等于画布（hstack 对此零容忍）
+    REQUIRE(tuned[0].w + tuned[1].w == 1000);
+    REQUIRE(tuned[0].h == tuned[1].h);
+
+    // 越界比例被夹住，不会把某一侧拖没
+    REQUIRE(set_node_ratio(layout, 0, -5.0));
+    REQUIRE(compute_pane_rects(layout, 1000, 400)[0].w > 0);
+    REQUIRE(set_node_ratio(layout, 0, 5.0));
+    std::vector<PixelRect> maxed = compute_pane_rects(layout, 1000, 400);
+    REQUIRE(maxed[1].w > 0);
+    REQUIRE(maxed[0].w + maxed[1].w == 1000);
+}
+
+TEST_CASE("分隔条命中判定", "[layout][ratio]") {
+    Layout layout = make_layout();
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+    REQUIRE(set_node_ratio(layout, 0, 0.25)); // 分隔条在 x=250/1000
+
+    auto on = hit_test_divider(layout, 1000, 400, 0.25, 0.5, 8);
+    REQUIRE(on.has_value());
+    REQUIRE(on->node == 0);
+    REQUIRE(on->dir == SplitDir::kHorizontal);
+
+    // 离得远就不该命中，否则普通左键点击会被误吞
+    REQUIRE_FALSE(hit_test_divider(layout, 1000, 400, 0.60, 0.5, 8).has_value());
+    // 单窗格没有分隔条
+    Layout single = make_layout();
+    REQUIRE_FALSE(hit_test_divider(single, 1000, 400, 0.5, 0.5, 8).has_value());
+}
+
+TEST_CASE("默认不选中任何窗格，编辑时才落到具体窗格", "[layout][focus]") {
+    Layout layout = make_layout();
+    clear_focus(layout);
+    REQUIRE(layout.focused == kNoFocus);
+    // 未选中时编辑动作默认作用于第一个窗格
+    REQUIRE(focused_or_first(layout) == leaf_order(layout).front());
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+    REQUIRE(layout.focused != kNoFocus);
+
+    clear_focus(layout);
+    focus_next(layout); // 未选中时第一次切换选中第一个
+    REQUIRE(layout.focused == leaf_order(layout).front());
+}
+
+TEST_CASE("滚轮以锚点为中心缩放视口", "[layout][view]") {
+    Region v{0.0, 0.0, 1.0, 1.0};
+    // 以正中间为锚点放大：锚点位置不动，视口变小
+    Region in = zoom_view_at(v, 0.5, 0.5, 0.5);
+    REQUIRE(in.width() == Catch::Approx(0.5));
+    REQUIRE(view_to_source_u(in, 0.5) == Catch::Approx(0.5));
+
+    // 以左上角为锚点放大：该点仍映射到原来的源坐标
+    Region corner = zoom_view_at(v, 0.0, 0.0, 0.5);
+    REQUIRE(view_to_source_u(corner, 0.0) == Catch::Approx(0.0));
+    REQUIRE(corner.width() == Catch::Approx(0.5));
+
+    // 缩小
+    Region out = zoom_view_at(v, 0.5, 0.5, 2.0);
+    REQUIRE(out.width() == Catch::Approx(2.0));
+}
+
 TEST_CASE("focus_next 在所有窗格间循环", "[layout]") {
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kHorizontal));

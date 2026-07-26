@@ -119,6 +119,8 @@ std::vector<int> leaf_order(const Layout &layout) {
 }
 
 bool split_focused(Layout &layout, SplitDir dir) {
+    // 没选中时默认作用于第一个窗格：编辑动作总要有个目标。
+    layout.focused = focused_or_first(layout);
     if (!valid_index(layout, layout.focused) || !layout.nodes[layout.focused].leaf) {
         return false;
     }
@@ -148,6 +150,7 @@ bool split_focused(Layout &layout, SplitDir dir) {
 }
 
 bool close_focused(Layout &layout) {
+    layout.focused = focused_or_first(layout);
     if (!valid_index(layout, layout.focused) || !layout.nodes[layout.focused].leaf) {
         return false;
     }
@@ -175,14 +178,30 @@ bool close_focused(Layout &layout) {
     return true;
 }
 
+int focused_or_first(const Layout &layout) {
+    std::vector<int> leaves = leaf_order(layout);
+    if (leaves.empty()) {
+        return 0;
+    }
+    if (std::find(leaves.begin(), leaves.end(), layout.focused) != leaves.end()) {
+        return layout.focused;
+    }
+    return leaves.front();
+}
+
+void clear_focus(Layout &layout) {
+    layout.focused = kNoFocus;
+}
+
 void focus_next(Layout &layout) {
     std::vector<int> leaves = leaf_order(layout);
     if (leaves.empty()) {
-        layout.focused = 0;
+        layout.focused = kNoFocus;
         return;
     }
     auto it = std::find(leaves.begin(), leaves.end(), layout.focused);
     if (it == leaves.end()) {
+        // 未选中时，第一次按"切换焦点"就选中第一个窗格
         layout.focused = leaves.front();
         return;
     }
@@ -191,6 +210,7 @@ void focus_next(Layout &layout) {
 }
 
 bool set_focused_region(Layout &layout, const Region &region) {
+    layout.focused = focused_or_first(layout);
     if (!valid_index(layout, layout.focused) || !layout.nodes[layout.focused].leaf) {
         return false;
     }
@@ -217,12 +237,12 @@ std::vector<PixelRect> compute_pane_rects(const Layout &layout, int canvas_w, in
             return;
         }
         if (node.dir == SplitDir::kHorizontal) {
-            int w1 = rect.w / 2;
+            int w1 = std::clamp(static_cast<int>(std::lround(rect.w * node.ratio)), 1, std::max(1, rect.w - 1));
             int w2 = rect.w - w1; // 减法取余数，保证 w1+w2 精确等于 rect.w
             walk(node.first, PixelRect{rect.x, rect.y, w1, rect.h});
             walk(node.second, PixelRect{rect.x + w1, rect.y, w2, rect.h});
         } else {
-            int h1 = rect.h / 2;
+            int h1 = std::clamp(static_cast<int>(std::lround(rect.h * node.ratio)), 1, std::max(1, rect.h - 1));
             int h2 = rect.h - h1;
             walk(node.first, PixelRect{rect.x, rect.y, rect.w, h1});
             walk(node.second, PixelRect{rect.x, rect.y + h1, rect.w, h2});
@@ -379,6 +399,75 @@ double view_to_source_u(const Region &view, double pane_u) {
 
 double view_to_source_v(const Region &view, double pane_v) {
     return view.y1 + pane_v * view.height();
+}
+
+Region zoom_view_at(const Region &view, double anchor_u, double anchor_v, double factor) {
+    // 锚点在源画面里的位置保持不动，视口按 factor 缩放。
+    double ax = view_to_source_u(view, anchor_u);
+    double ay = view_to_source_v(view, anchor_v);
+    Region out;
+    out.x1 = ax - (ax - view.x1) * factor;
+    out.x2 = ax + (view.x2 - ax) * factor;
+    out.y1 = ay - (ay - view.y1) * factor;
+    out.y2 = ay + (view.y2 - ay) * factor;
+    return out;
+}
+
+std::optional<DividerHit> hit_test_divider(const Layout &layout, int canvas_w, int canvas_h, double cu,
+                                            double cv, int tolerance_px) {
+    if (canvas_w <= 0 || canvas_h <= 0 || layout.nodes.empty()) {
+        return std::nullopt;
+    }
+    double px = cu * canvas_w;
+    double py = cv * canvas_h;
+
+    std::optional<DividerHit> best;
+    double best_dist = static_cast<double>(tolerance_px) + 1.0;
+
+    std::function<void(int, PixelRect)> walk = [&](int index, PixelRect rect) {
+        if (!valid_index(layout, index)) {
+            return;
+        }
+        const Node &node = layout.nodes[index];
+        if (node.leaf) {
+            return;
+        }
+        if (node.dir == SplitDir::kHorizontal) {
+            int w1 = std::clamp(static_cast<int>(std::lround(rect.w * node.ratio)), 1, std::max(1, rect.w - 1));
+            double line = rect.x + w1;
+            if (py >= rect.y && py <= rect.y + rect.h) {
+                double dist = std::abs(px - line);
+                if (dist <= tolerance_px && dist < best_dist) {
+                    best_dist = dist;
+                    best = DividerHit{index, node.dir, rect};
+                }
+            }
+            walk(node.first, PixelRect{rect.x, rect.y, w1, rect.h});
+            walk(node.second, PixelRect{rect.x + w1, rect.y, rect.w - w1, rect.h});
+        } else {
+            int h1 = std::clamp(static_cast<int>(std::lround(rect.h * node.ratio)), 1, std::max(1, rect.h - 1));
+            double line = rect.y + h1;
+            if (px >= rect.x && px <= rect.x + rect.w) {
+                double dist = std::abs(py - line);
+                if (dist <= tolerance_px && dist < best_dist) {
+                    best_dist = dist;
+                    best = DividerHit{index, node.dir, rect};
+                }
+            }
+            walk(node.first, PixelRect{rect.x, rect.y, rect.w, h1});
+            walk(node.second, PixelRect{rect.x, rect.y + h1, rect.w, rect.h - h1});
+        }
+    };
+    walk(0, PixelRect{0, 0, canvas_w, canvas_h});
+    return best;
+}
+
+bool set_node_ratio(Layout &layout, int node, double ratio) {
+    if (!valid_index(layout, node) || layout.nodes[node].leaf) {
+        return false;
+    }
+    layout.nodes[node].ratio = std::clamp(ratio, kMinSplitRatio, 1.0 - kMinSplitRatio);
+    return true;
 }
 
 Region translate_view(const Region &view, double du, double dv) {

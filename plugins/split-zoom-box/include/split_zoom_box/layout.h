@@ -29,14 +29,23 @@ struct Node {
     // 两处都别扭。视口模型下这两件事都是自然的。
     Region region;
     SplitDir dir = SplitDir::kHorizontal; // 仅内部节点有意义
+    // 仅内部节点有意义：第一个子节点占父节点的比例。可以拖分隔条调整。
+    double ratio = 0.5;
     int first = -1;
     int second = -1;
 };
 
+// 没有任何窗格被选中。焦点是编辑期状态：播放时不该有个橙框杵在那里，
+// 所以进入分屏段/读档后默认无焦点，只有真正开始编辑才会选中。
+inline constexpr int kNoFocus = -1;
+
 struct Layout {
     std::vector<Node> nodes;
-    int focused = 0; // 聚焦的叶子索引
+    int focused = kNoFocus; // 聚焦的叶子索引，kNoFocus = 未选中
 };
+
+// 当前聚焦的叶子；没有选中或索引失效时返回第一个叶子（编辑动作总要有个目标）。
+int focused_or_first(const Layout &layout);
 
 Layout make_layout(Region region = Region{});
 
@@ -55,6 +64,7 @@ bool split_focused(Layout &layout, SplitDir dir);
 bool close_focused(Layout &layout);
 
 void focus_next(Layout &layout);
+void clear_focus(Layout &layout);
 
 bool set_focused_region(Layout &layout, const Region &region);
 
@@ -110,6 +120,26 @@ double view_to_source_v(const Region &view, double pane_v);
 
 // 平移视口。不做任何范围限制：可以把画面整个拖出窗格。
 Region translate_view(const Region &view, double du, double dv);
+
+// 以窗格内某点为中心缩放视口。factor < 1 放大（视口变小），> 1 缩小。
+// anchor_u/v 是窗格内归一化坐标：以鼠标位置为锚点，滚轮缩放时该点保持不动。
+Region zoom_view_at(const Region &view, double anchor_u, double anchor_v, double factor);
+
+// 分隔条命中结果。拖它可以调整两侧窗格的比例。
+struct DividerHit {
+    int node = -1; // 内部节点索引
+    SplitDir dir = SplitDir::kHorizontal;
+    PixelRect area; // 该内部节点占据的画布矩形，用来把鼠标位置换算成比例
+};
+
+// cu/cv 是画布归一化坐标，tolerance_px 是判定为"点在分隔条上"的像素容差。
+std::optional<DividerHit> hit_test_divider(const Layout &layout, int canvas_w, int canvas_h, double cu,
+                                            double cv, int tolerance_px);
+
+// 设置某个内部节点的分割比例，夹在 [kMinSplitRatio, 1-kMinSplitRatio] 内，
+// 避免把某一侧拖到看不见。
+bool set_node_ratio(Layout &layout, int node, double ratio);
+inline constexpr double kMinSplitRatio = 0.05;
 
 struct PaneHit {
     int leaf = -1;  // 命中的叶子节点索引

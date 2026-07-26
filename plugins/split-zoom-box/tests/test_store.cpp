@@ -19,6 +19,20 @@ Layout make_2x2() {
 
 } // namespace
 
+TEST_CASE("分割比例会被持久化，老存档按等分读", "[store]") {
+    Layout layout = make_layout();
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+    REQUIRE(set_node_ratio(layout, 0, 0.3));
+    Layout back = store::deserialize_layout(store::serialize_layout(layout));
+    std::vector<PixelRect> rects = compute_pane_rects(back, 1000, 400);
+    REQUIRE(rects[0].w == 300);
+
+    // 老存档没有 ratio 字段 -> 等分
+    Layout old = store::deserialize_layout(
+        R"({"leaf":false,"dir":"h","children":[{"leaf":true},{"leaf":true}]})");
+    REQUIRE(compute_pane_rects(old, 1000, 400)[0].w == 500);
+}
+
 TEST_CASE("布局树序列化往返保持结构与区域", "[store]") {
     Layout layout = make_2x2();
     std::vector<int> leaves = leaf_order(layout);
@@ -36,13 +50,15 @@ TEST_CASE("布局树序列化往返保持结构与区域", "[store]") {
             build_filter_graph(layout, 640, 360, 640, 360));
 }
 
-TEST_CASE("读档后焦点落到第一个窗格", "[store]") {
+TEST_CASE("读档后不选中任何窗格", "[store]") {
+    // 焦点是编辑期状态、不持久化；而且播放时不该有个橙框杵在画面上，
+    // 所以读档/进入分屏段后默认无选中，真正开始编辑才会选中。
     Layout layout = make_2x2();
     focus_next(layout);
     focus_next(layout);
 
     Layout restored = store::deserialize_layout(store::serialize_layout(layout));
-    REQUIRE(restored.focused == leaf_order(restored).front());
+    REQUIRE(restored.focused == kNoFocus);
 }
 
 TEST_CASE("损坏的布局 JSON 退化成单窗格完整画面", "[store]") {

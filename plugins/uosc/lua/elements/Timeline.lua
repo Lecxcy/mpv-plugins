@@ -317,28 +317,59 @@ function Timeline:render()
 		ass:rect(rax, fay, rbx, fby, {color = chapter_range.color, opacity = chapter_range.opacity})
 	end
 
-	-- enhanced-ab-loop segments: each segment's own range gets a solid color
-	-- fill, independent of whether the native loop is currently on/off
-	-- (`state.loop_enabled`/`ab-loop-a`/`ab-loop-b` are irrelevant here on
-	-- purpose -- disabling the master loop switch shouldn't hide the ranges,
-	-- it only stops mpv from enforcing them). "Active" (playhead currently
-	-- inside this enabled segment) gets a brighter fill + border; this is
-	-- computed from `state.time` directly rather than matching `ab-loop-a`,
-	-- so it still lights up even while the master loop switch is off.
+	-- enhanced-ab-loop segments (bottom layer) + split-zoom-box segments (top
+	-- layer). When split segments exist the two share the bar height so both
+	-- stay readable; with none, ab-loop keeps the full height exactly as
+	-- before, so ab-loop-only usage is unaffected. The split is proportional
+	-- to whatever height the bar currently has, so it also works while the
+	-- timeline is collapsed to the thin progress bar (each layer just gets
+	-- half of those few pixels).
+	local has_split = #state.split_zoom_segments > 0
+	local ab_ay, ab_by = fay, fby
+	local sz_ay, sz_by = fay, fby
+	if has_split then
+		local mid = fay + (fby - fay) / 2
+		sz_ay, sz_by = fay, mid   -- split segments on top
+		ab_ay, ab_by = mid, fby   -- ab-loop below
+	end
+
+	-- Each segment's own range gets a solid color fill, independent of whether
+	-- the native loop is currently on/off (`state.loop_enabled`/`ab-loop-a`/
+	-- `ab-loop-b` are irrelevant here on purpose -- disabling the master loop
+	-- switch shouldn't hide the ranges, it only stops mpv from enforcing them).
+	-- "Active" (playhead currently inside this enabled segment) gets a brighter
+	-- fill + border; this is computed from `state.time` directly rather than
+	-- matching `ab-loop-a`, so it still lights up even while the master loop
+	-- switch is off.
 	for _, segment in ipairs(state.ab_loop_segments) do
 		local rax = segment.a < 0.1 and bax or t2x(segment.a)
 		local rbx = segment.b > state.duration - 0.1 and bbx or t2x(math.min(segment.b, state.duration))
 		if segment.enabled then
 			local is_active = state.time and state.time >= segment.a and state.time < segment.b
-			ass:rect(rax, fay, rbx, fby, {
+			ass:rect(rax, ab_ay, rbx, ab_by, {
 				color = config.color.success,
 				opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
 				border = is_active and 1 or 0,
 				border_color = fg,
 			})
 		else
-			ass:rect(rax, fay, rbx, fby, {color = fg, opacity = 0.12})
+			ass:rect(rax, ab_ay, rbx, ab_by, {color = fg, opacity = 0.12})
 		end
+	end
+
+	-- split-zoom-box segments. Different color from ab-loop (match = blue) so
+	-- the two layers are told apart by hue, not just position; same
+	-- active-highlight treatment so both read the same way.
+	for _, segment in ipairs(state.split_zoom_segments) do
+		local rax = segment.a < 0.1 and bax or t2x(segment.a)
+		local rbx = segment.b > state.duration - 0.1 and bbx or t2x(math.min(segment.b, state.duration))
+		local is_active = state.time and state.time >= segment.a and state.time < segment.b
+		ass:rect(rax, sz_ay, rbx, sz_by, {
+			color = config.color.match,
+			opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
+			border = is_active and 1 or 0,
+			border_color = fg,
+		})
 	end
 
 	-- Chapters
@@ -405,7 +436,7 @@ function Timeline:render()
 			-- fall back to the single-marker wedges when there's no segment
 			-- list at all (e.g. plain uosc without enhanced-ab-loop, or
 			-- enhanced-ab-loop loaded but no segments defined yet).
-			local has_ab_segments = #state.ab_loop_segments > 0
+			local has_ab_segments = #state.ab_loop_segments > 0 or #state.split_zoom_segments > 0
 			local has_a = not has_ab_segments and state.ab_loop_a and state.ab_loop_a >= 0
 			local has_b = not has_ab_segments and state.ab_loop_b and state.ab_loop_b > 0
 			local ab_radius = round(math.min(math.max(8, foreground_size * 0.25), foreground_size))

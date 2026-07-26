@@ -125,6 +125,13 @@ success、`vf` 属性仍报告 `enabled: true`，只有日志里说被禁用）�
 - **没有 `enabled` 标志**：ab-loop 需要"临时禁用某段但不删"是因为循环全程高频
   使用，分屏没有这个模式。要停用就直接删。
 
+### 进度条展示
+
+分屏段以原生 node 发布在 `user-data/split-zoom-box/segments`，fork 的 uosc
+在时间轴上与 ab-loop 区间**上下分层**画出来：分屏段在上层（蓝），ab-loop 在
+下层（绿），当前所在的区间加亮并描边。没有分屏段时 ab-loop 仍占满原高度，
+只用 ab-loop 的场景不受影响。
+
 ### 与 enhanced-ab-loop 协同
 
 `Alt+i` 会读 enhanced-ab-loop 发布的 `user-data/enhanced-ab-loop/segments`
@@ -155,7 +162,7 @@ enhanced-ab-loop 的 `store`：**内容采样哈希**（文件大小 + 头尾各
 | `WHEEL_UP`/`WHEEL_DOWN` | 缩放**鼠标所在**的窗格（鼠标不在窗格内则用选中的，都没有则用第一个） |
 | `Alt+,` / `Alt+.` | 设定分屏段起点 / 终点 |
 | `Alt+/` | 删除当前所在的分屏段 |
-| `Alt+\` | 列出所有分屏段和当前所处位置 |
+| `Alt+\` | 列出所有分屏段和当前所处位置（格式与 ab-loop 的 `\` 对齐，超过 12 段时首尾各留 6 段） |
 | `Alt+i` | 把当前所在的 ab-loop 区间原样建成一个分屏段 |
 | `Alt+s` / `Alt+l` | 存档 / 读档 |
 | `Alt+y` / `Alt+n` | 读档时"文件可能改过名"的确认（`y`/`n` 已被 enhanced-ab-loop 占用） |

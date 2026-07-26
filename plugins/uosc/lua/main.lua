@@ -379,6 +379,7 @@ state = {
 	chapters = {},
 	chapter_ranges = {},
 	ab_loop_segments = {}, -- enhanced-ab-loop 插件发布的完整区间列表，见 user-data/enhanced-ab-loop/segments 的 observer
+	split_zoom_segments = {}, -- split-zoom-box 插件发布的分屏段，见 user-data/split-zoom-box/segments 的 observer
 	border = mp.get_property_native('border'),
 	title_bar = mp.get_property_native('title-bar'),
 	fullscreen = mp.get_property_native('fullscreen'),
@@ -717,6 +718,12 @@ mp.observe_property('ab-loop-b', 'number', create_state_setter('ab_loop_b'))
 -- 设置过这个属性时，value 是 nil，保持空列表即可。
 mp.observe_property('user-data/enhanced-ab-loop/segments', 'native', function(_, value)
 	set_state('ab_loop_segments', type(value) == 'table' and value or {})
+	request_render()
+end)
+-- split-zoom-box 的分屏段。同样必须用 'native'：用 'string' + parse_json 会
+-- 静默拿到原字符串而不是 table（见 enhanced-ab-loop 的同款坑）。
+mp.observe_property('user-data/split-zoom-box/segments', 'native', function(_, value)
+	set_state('split_zoom_segments', type(value) == 'table' and value or {})
 	request_render()
 end)
 mp.observe_property('playlist-pos-1', 'number', create_state_setter('playlist_pos'))

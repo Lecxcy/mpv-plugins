@@ -1,5 +1,6 @@
 #include <mpv/client.h>
 
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -313,6 +314,40 @@ struct PluginState {
     PixelRect sizing_area;
     std::chrono::steady_clock::time_point sizing_last_apply{};
 };
+
+// 把分屏段发布成原生 node，供 fork 的 uosc 在进度条上画出来。
+// 必须用 MPV_FORMAT_NODE 而不是 JSON 字符串：enhanced-ab-loop 踩过这个坑
+// （commit 50029a1）——Lua 侧 observe_property 回调里的 parse_json 会静默
+// 返回原字符串而不是 table，属性看着有值、UI 却永远是空的。
+void publish_segments_property(mpv_handle *h, const std::vector<LayoutSegment> &segments) {
+    static char key_a[] = "a";
+    static char key_b[] = "b";
+
+    std::vector<std::array<mpv_node, 2>> map_values(segments.size());
+    std::vector<std::array<char *, 2>> map_keys(segments.size());
+    std::vector<mpv_node_list> maps(segments.size());
+    std::vector<mpv_node> array_values(segments.size());
+
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        map_values[i][0] = {.u = {.double_ = segments[i].a}, .format = MPV_FORMAT_DOUBLE};
+        map_values[i][1] = {.u = {.double_ = segments[i].b}, .format = MPV_FORMAT_DOUBLE};
+        map_keys[i] = {key_a, key_b};
+
+        maps[i].num = static_cast<int>(map_values[i].size());
+        maps[i].values = map_values[i].data();
+        maps[i].keys = map_keys[i].data();
+
+        array_values[i].format = MPV_FORMAT_NODE_MAP;
+        array_values[i].u.list = &maps[i];
+    }
+
+    mpv_node_list array_list{.num = static_cast<int>(segments.size()), .values = array_values.data(),
+                              .keys = nullptr};
+    mpv_node root{.u = {.list = &array_list}, .format = MPV_FORMAT_NODE_ARRAY};
+    // mpv_set_property 在返回前就把整棵 node 拷走了，上面这些局部量只需要活过
+    // 这一次调用。
+    mpv_set_property(h, "user-data/split-zoom-box/segments", MPV_FORMAT_NODE, &root);
+}
 
 double time_pos(mpv_handle *h) {
     return mpv_util::get_double(h, "time-pos", 0.0);
@@ -1011,12 +1046,30 @@ void drag_finish(PluginState &state) {
 
 // ---- 按键动作 ----
 
+// 两个时间格式都与 enhanced-ab-loop 保持一致，方便两个插件的 OSD 并排看。
 std::string format_time(double seconds) {
     if (seconds < 0.0) {
         seconds = 0.0;
     }
-    int total = static_cast<int>(seconds + 0.5);
-    return fmt::format("{:02d}:{:02d}", total / 60, total % 60);
+    long total = static_cast<long>(seconds + 0.5);
+    long hours = total / 3600;
+    long minutes = (total % 3600) / 60;
+    long secs = total % 60;
+    if (hours > 0) {
+        return fmt::format("{}:{:02}:{:02}", hours, minutes, secs);
+    }
+    return fmt::format("{:02}:{:02}", minutes, secs);
+}
+
+std::string format_precise(double seconds) {
+    double h = std::floor(seconds / 3600.0);
+    double remainder = std::fmod(seconds, 3600.0);
+    double m = std::floor(remainder / 60.0);
+    double s = std::fmod(remainder, 60.0);
+    if (h > 0) {
+        return fmt::format("{}:{:02}:{:06.3f}", static_cast<long>(h), static_cast<long>(m), s);
+    }
+    return fmt::format("{:02}:{:06.3f}", static_cast<long>(m), s);
 }
 
 // 编辑落到全局布局上时提醒一句。只在**已经存在分屏段**时提示：没有段的时候
@@ -1030,31 +1083,44 @@ void warn_if_editing_base(PluginState &state) {
     }
 }
 
-// 列出所有分屏段和当前所处位置。对应 enhanced-ab-loop 的 show-state。
+// 列出所有分屏段和当前所处位置。格式与 enhanced-ab-loop 的 show-state 对齐
+// （首行状态 + 每段一行竖排 + 超过 12 段时首尾各留 6 段），只是没有 A/B
+// 待定端点那一段——分屏没有"半个区间"的概念。
 void on_show_state(PluginState &state) {
     double pos = time_pos(state.handle);
     auto current = find_segment_at(state.segments, pos);
 
-    std::string text = fmt::format("Split | {} | ", format_time(pos));
+    std::ostringstream text;
+    text << "Split | " << format_time(pos) << "/"
+         << format_time(mpv_util::get_double(state.handle, "duration", 0.0)) << " | ";
     if (current) {
-        text += fmt::format("segment {}", *current + 1);
+        text << "segment " << (*current + 1);
     } else {
-        text += fmt::format("global ({} panes)", leaf_count(state.base));
+        text << "global (" << leaf_count(state.base) << " panes)";
     }
     if (state.pending_segment_start) {
-        text += fmt::format("  pending start {}", format_time(*state.pending_segment_start));
+        text << " | pending " << format_precise(*state.pending_segment_start);
     }
 
-    if (state.segments.empty()) {
-        text += "\\N(no split segments)";
-    } else {
-        for (std::size_t i = 0; i < state.segments.size(); ++i) {
-            const LayoutSegment &seg = state.segments[i];
-            text += fmt::format("\\N{}{}. {} - {}  {} panes", (current && *current == i) ? "> " : "  ",
-                                 i + 1, format_time(seg.a), format_time(seg.b), leaf_count(seg.layout));
+    auto append = [&](std::size_t i) {
+        const LayoutSegment &seg = state.segments[i];
+        text << "\n" << ((current && *current == i) ? "> " : "") << "[" << format_precise(seg.a) << ","
+             << format_precise(seg.b) << "] " << leaf_count(seg.layout) << " panes";
+    };
+
+    std::size_t total = state.segments.size();
+    SegmentDisplayPlan plan = plan_segment_display(total);
+    for (std::size_t i = 0; i < plan.head_count; ++i) {
+        append(i);
+    }
+    if (plan.hidden_count > 0) {
+        text << "\n... (" << plan.hidden_count << " more)";
+        for (std::size_t i = total - plan.tail_count; i < total; ++i) {
+            append(i);
         }
     }
-    mpv_util::show_osd_message(state.handle, text, 4.0);
+
+    mpv_util::show_osd_message(state.handle, text.str(), 4.0);
 }
 
 void on_split(PluginState &state, SplitDir dir) {
@@ -1157,6 +1223,7 @@ void on_segment_end(PluginState &state) {
     sort_segments(state.segments);
     state.pending_segment_start.reset();
 
+    publish_segments_property(state.handle, state.segments);
     refresh(state, true);
     mpv_util::show_osd_message(state.handle,
                                fmt::format("Split segment {} - {} ({} total)", format_time(a),
@@ -1238,6 +1305,7 @@ void on_segment_from_abloop(PluginState &state) {
     sort_segments(state.segments);
     state.pending_segment_start.reset();
 
+    publish_segments_property(state.handle, state.segments);
     refresh(state, true);
     mpv_util::show_osd_message(state.handle,
                                fmt::format("Split segment from ab-loop {} - {} ({} total)",
@@ -1250,6 +1318,7 @@ void on_segment_clear(PluginState &state) {
     double pos = time_pos(state.handle);
     if (auto index = find_segment_at(state.segments, pos)) {
         state.segments.erase(state.segments.begin() + static_cast<std::ptrdiff_t>(*index));
+        publish_segments_property(state.handle, state.segments);
         refresh(state, true);
         mpv_util::show_osd_message(state.handle, fmt::format("Split segment deleted, {} left", state.segments.size()),
                                    kOsdDuration);
@@ -1315,6 +1384,7 @@ void apply_entry(PluginState &state, store::FileEntry entry) {
     state.base = entry.base;
     state.segments = std::move(entry.segments);
     state.pending_segment_start.reset();
+    publish_segments_property(state.handle, state.segments);
     refresh(state, true);
 }
 
@@ -1423,6 +1493,7 @@ void on_file_loaded(PluginState &state) {
     state.rename_from.reset();
     state.awaiting_confirm = false;
     state.applied_key.clear();
+    publish_segments_property(state.handle, state.segments);
 }
 
 void handle_client_message(PluginState &state, mpv_event_client_message *message) {

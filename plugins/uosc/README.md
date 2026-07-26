@@ -82,6 +82,23 @@
 
 ## 相对上游的改动
 
+### 进度条上叠加 split-zoom-box 的分屏段（2026-07-26）
+
+`lua/main.lua`：新增 `state.split_zoom_segments` 及对
+`user-data/split-zoom-box/segments` 的 `observe_property(..., 'native', ...)`。
+必须用 `'native'`——用 `'string'` + `parse_json` 会静默拿到原字符串而不是
+table（与 enhanced-ab-loop 那次是同一个坑）。
+
+`lua/elements/Timeline.lua`：ab-loop 区间与分屏段**上下分层**绘制——存在分屏段
+时，时间轴高度对半分，分屏段画上层（`config.color.match`，蓝）、ab-loop 画下层
+（`config.color.success`，绿）；没有分屏段时 ab-loop 仍占满原高度，只用
+ab-loop 的场景观感完全不变。两者都用同一套"当前所在区间加亮 + 描边"的处理。
+分层是按当前条高按比例切的，所以时间轴收拢成细进度条时同样成立（各占一半）。
+原生 A/B 楔形标记在**任一种**区间存在时都隐藏。
+
+`uosc.conf`：`progress` 由 `windowed` 改为 `always`，让细进度条在全屏下也显示。
+
+
 - **`elements/Timeline.lua`**：在原有的"Custom ranges"（`chapter_ranges`）
   渲染块之后，新增一段循环，把 `state.ab_loop_segments` 里的每一段区间画
   成进度条上的实心色块：`enabled=true` 的画绿色（`config.color.success`），

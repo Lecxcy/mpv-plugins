@@ -526,6 +526,15 @@ std::optional<std::size_t> find_segment_at(const std::vector<LayoutSegment> &seg
     return std::nullopt;
 }
 
+SegmentDisplayPlan plan_segment_display(std::size_t total, std::size_t max_visible) {
+    if (total <= max_visible) {
+        return SegmentDisplayPlan{total, 0, 0};
+    }
+    std::size_t head = max_visible / 2;
+    std::size_t tail = max_visible - head;
+    return SegmentDisplayPlan{head, total - head - tail, tail};
+}
+
 std::optional<std::size_t> overlapping_segment(const std::vector<LayoutSegment> &segments, double a, double b,
                                                 std::optional<std::size_t> ignore_index) {
     double lo = std::min(a, b);

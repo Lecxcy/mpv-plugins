@@ -400,6 +400,25 @@ TEST_CASE("滚轮以锚点为中心缩放视口", "[layout][view]") {
     REQUIRE(out.width() == Catch::Approx(2.0));
 }
 
+TEST_CASE("分屏段列表的省略规则与 ab-loop 一致（首尾各 6 段）", "[layout][display]") {
+    // 不超过上限就全展示
+    auto few = plan_segment_display(5);
+    REQUIRE(few.head_count == 5);
+    REQUIRE(few.hidden_count == 0);
+    REQUIRE(few.tail_count == 0);
+
+    auto exact = plan_segment_display(12);
+    REQUIRE(exact.head_count == 12);
+    REQUIRE(exact.hidden_count == 0);
+
+    // 超过就首尾各留 6、中间折叠
+    auto many = plan_segment_display(20);
+    REQUIRE(many.head_count == 6);
+    REQUIRE(many.tail_count == 6);
+    REQUIRE(many.hidden_count == 8);
+    REQUIRE(many.head_count + many.hidden_count + many.tail_count == 20);
+}
+
 TEST_CASE("focus_next 在所有窗格间循环", "[layout]") {
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kHorizontal));

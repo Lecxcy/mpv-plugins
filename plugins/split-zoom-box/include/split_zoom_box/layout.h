@@ -178,6 +178,18 @@ void sort_segments(std::vector<LayoutSegment> &segments);
 // 落在闭区间 [a,b] 内的第一个区间。
 std::optional<std::size_t> find_segment_at(const std::vector<LayoutSegment> &segments, double pos);
 
+// 展示分屏段列表时的省略计划：总数不超过 max_visible 就全展示，否则首尾各留
+// 一半、中间折叠。与 enhanced-ab-loop 的 plan_segment_display 保持同一套规则
+// 和同样的默认值（首尾各 6 段），两个插件的状态展示才好对齐。
+struct SegmentDisplayPlan {
+    std::size_t head_count = 0;
+    std::size_t hidden_count = 0;
+    std::size_t tail_count = 0;
+};
+
+inline constexpr std::size_t kMaxVisibleSegments = 12;
+SegmentDisplayPlan plan_segment_display(std::size_t total, std::size_t max_visible = kMaxVisibleSegments);
+
 // 与已有区间重叠则返回那个区间的下标。冲突直接拒绝插入，不做隐式的边界借用
 // 或吞并——同一时刻两个布局都想生效是没有意义的。
 std::optional<std::size_t> overlapping_segment(const std::vector<LayoutSegment> &segments, double a, double b,

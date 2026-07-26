@@ -317,27 +317,108 @@ function Timeline:render()
 		ass:rect(rax, fay, rbx, fby, {color = chapter_range.color, opacity = chapter_range.opacity})
 	end
 
-	-- enhanced-ab-loop segments: each segment's own range gets a solid color
-	-- fill, independent of whether the native loop is currently on/off
-	-- (`state.loop_enabled`/`ab-loop-a`/`ab-loop-b` are irrelevant here on
-	-- purpose -- disabling the master loop switch shouldn't hide the ranges,
-	-- it only stops mpv from enforcing them). "Active" (playhead currently
-	-- inside this enabled segment) gets a brighter fill + border; this is
-	-- computed from `state.time` directly rather than matching `ab-loop-a`,
-	-- so it still lights up even while the master loop switch is off.
+	-- enhanced-ab-loop segments + split-zoom-box segments.
+	--
+	-- Layout rules:
+	--  * both kinds present AND the bar is tall enough -> stack them, split
+	--    segments on top, ab-loop below, each getting exactly half the height
+	--    (the midpoint is rounded so both halves are whole pixels -- a
+	--    fractional midpoint leaves a blended row that makes one band read as
+	--    thinner than the other);
+	--  * otherwise (only one kind, or collapsed to the thin progress bar) each
+	--    spans the full height, and overlapping stretches are drawn **once** in
+	--    the mix of the two colors rather than as two translucent rects stacked
+	--    on each other -- stacking muddies into whatever was drawn last and
+	--    reads as a rendering glitch.
+	--
+	-- Segment ranges are drawn independently of whether the native loop is
+	-- currently on/off (`state.loop_enabled`/`ab-loop-a`/`ab-loop-b` are
+	-- irrelevant here on purpose -- disabling the master loop switch shouldn't
+	-- hide the ranges, it only stops mpv from enforcing them). "Active"
+	-- (playhead currently inside the range) gets a brighter fill + border,
+	-- computed from `state.time` directly so it still lights up while the
+	-- master loop switch is off.
+	local has_ab, has_split = #state.ab_loop_segments > 0, #state.split_zoom_segments > 0
+	local layered = has_ab and has_split and (fby - fay) >= 8 * state.scale
+
+	local function seg_x(a, b)
+		local rax = a < 0.1 and bax or t2x(a)
+		local rbx = b > state.duration - 0.1 and bbx or t2x(math.min(b, state.duration))
+		return rax, rbx
+	end
+
+	local function draw_range(a, b, ay, by, color)
+		local rax, rbx = seg_x(a, b)
+		local is_active = state.time and state.time >= a and state.time < b
+		ass:rect(rax, ay, rbx, by, {
+			color = color,
+			opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
+			border = is_active and 1 or 0,
+			border_color = fg,
+		})
+	end
+
+	-- Disabled ab-loop segments are just a faint gray stripe; they never take
+	-- part in the color mixing below.
 	for _, segment in ipairs(state.ab_loop_segments) do
-		local rax = segment.a < 0.1 and bax or t2x(segment.a)
-		local rbx = segment.b > state.duration - 0.1 and bbx or t2x(math.min(segment.b, state.duration))
-		if segment.enabled then
-			local is_active = state.time and state.time >= segment.a and state.time < segment.b
-			ass:rect(rax, fay, rbx, fby, {
-				color = config.color.success,
-				opacity = {main = is_active and 0.55 or 0.3, border = is_active and 0.9 or 0},
-				border = is_active and 1 or 0,
-				border_color = fg,
-			})
-		else
+		if not segment.enabled then
+			local rax, rbx = seg_x(segment.a, segment.b)
 			ass:rect(rax, fay, rbx, fby, {color = fg, opacity = 0.12})
+		end
+	end
+
+	if layered then
+		local mid = fay + round((fby - fay) / 2)
+		for _, segment in ipairs(state.ab_loop_segments) do
+			if segment.enabled then draw_range(segment.a, segment.b, mid, fby, config.color.success) end
+		end
+		for _, segment in ipairs(state.split_zoom_segments) do
+			draw_range(segment.a, segment.b, fay, mid, config.color.match)
+		end
+	else
+		-- Average the two colors channel-wise. uosc colors are plain hex
+		-- strings, so this works whatever channel order they're in.
+		local function mix(c1, c2)
+			local out = ''
+			for i = 1, 5, 2 do
+				local a, b = tonumber(c1:sub(i, i + 1), 16) or 0, tonumber(c2:sub(i, i + 1), 16) or 0
+				out = out .. string.format('%02x', math.floor((a + b) / 2))
+			end
+			return out
+		end
+		local mixed = mix(config.color.success, config.color.match)
+
+		-- Cut both lists into elementary, non-overlapping intervals so every
+		-- stretch is painted exactly once.
+		local points = {}
+		local function add_point(v) points[#points + 1] = v end
+		for _, s in ipairs(state.ab_loop_segments) do
+			if s.enabled then add_point(s.a) add_point(s.b) end
+		end
+		for _, s in ipairs(state.split_zoom_segments) do add_point(s.a) add_point(s.b) end
+		table.sort(points)
+
+		for i = 1, #points - 1 do
+			local a, b = points[i], points[i + 1]
+			if b - a > 1e-6 then
+				local probe = (a + b) / 2
+				local in_ab, in_sz = false, false
+				for _, s in ipairs(state.ab_loop_segments) do
+					if s.enabled and probe >= s.a and probe < s.b then in_ab = true break end
+				end
+				for _, s in ipairs(state.split_zoom_segments) do
+					if probe >= s.a and probe < s.b then in_sz = true break end
+				end
+				local color = nil
+				if in_ab and in_sz then
+					color = mixed
+				elseif in_ab then
+					color = config.color.success
+				elseif in_sz then
+					color = config.color.match
+				end
+				if color then draw_range(a, b, fay, fby, color) end
+			end
 		end
 	end
 
@@ -405,7 +486,7 @@ function Timeline:render()
 			-- fall back to the single-marker wedges when there's no segment
 			-- list at all (e.g. plain uosc without enhanced-ab-loop, or
 			-- enhanced-ab-loop loaded but no segments defined yet).
-			local has_ab_segments = #state.ab_loop_segments > 0
+			local has_ab_segments = #state.ab_loop_segments > 0 or #state.split_zoom_segments > 0
 			local has_a = not has_ab_segments and state.ab_loop_a and state.ab_loop_a >= 0
 			local has_b = not has_ab_segments and state.ab_loop_b and state.ab_loop_b > 0
 			local ab_radius = round(math.min(math.max(8, foreground_size * 0.25), foreground_size))

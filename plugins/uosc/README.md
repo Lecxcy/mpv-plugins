@@ -82,6 +82,36 @@
 
 ## 相对上游的改动
 
+### 进度条上叠加 split-zoom-box 的分屏段（2026-07-26）
+
+`lua/main.lua`：新增 `state.split_zoom_segments` 及对
+`user-data/split-zoom-box/segments` 的 `observe_property(..., 'native', ...)`。
+必须用 `'native'`——用 `'string'` + `parse_json` 会静默拿到原字符串而不是
+table（与 enhanced-ab-loop 那次是同一个坑）。
+
+`lua/elements/Timeline.lua`：ab-loop 区间与分屏段的绘制分两种情形——
+
+- **两种区间都存在、且条高足够（>= 8*scale）时上下分层**：时间轴高度对半分，
+  分屏段画上层（`config.color.match`，蓝）、ab-loop 画下层
+  （`config.color.success`，绿）。
+- **其余情况各自占满整条高度**：只有一种区间时没有必要让出空间；时间轴收拢
+  成细进度条时也不分层——那里只有一两个像素高，切成两条 1px 既难看也读不出
+  信息。
+
+  这种情况下会把两份区间切成互不重叠的基本区间，**每段只画一次**：只有
+  ab-loop 的用绿、只有分屏段的用蓝、两者重叠的用**两色逐通道平均出来的
+  混合色**。不是把两个半透明矩形叠着画——那样重叠处会被后画的那个盖住、
+  糊成一片，看着像渲染错误。
+
+分层时中线取整（`round`），保证上下两条都是整像素高；中线落在半像素上会留下
+一行混合像素，让其中一条看起来比另一条矮。
+
+两者都用同一套"当前所在区间加亮 + 描边"的处理。原生 A/B 楔形标记在**任一种**
+区间存在时都隐藏。
+
+`uosc.conf`：`progress` 由 `windowed` 改为 `always`，让细进度条在全屏下也显示。
+
+
 - **`elements/Timeline.lua`**：在原有的"Custom ranges"（`chapter_ranges`）
   渲染块之后，新增一段循环，把 `state.ab_loop_segments` 里的每一段区间画
   成进度条上的实心色块：`enabled=true` 的画绿色（`config.color.success`），

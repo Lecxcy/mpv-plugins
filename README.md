@@ -7,20 +7,19 @@
 
 来源、许可证与改动详情见各插件目录下的 README。
 
-- [drag-zoom-box](plugins/drag-zoom-box/README.md)（C++）：仿 PotPlayer 的
-  手势 Zoom 逻辑并进行优化，仅放大框选范围，只认左上到右下、右下到左上
-  两个对角线方向。
 - [enhanced-ab-loop](plugins/enhanced-ab-loop/README.md)（C++）：仿 PotPlayer
   的 A/B Loop 表现并进行优化，支持设置多段不相交的 Loop 区间，并内建了
   尾帧冻结能力。
-- [enhanced-drag](plugins/enhanced-drag/README.md)（C++）：仿 PotPlayer 的
-  手势 Pane 拖拽逻辑。
 - [enhanced-rotation](plugins/enhanced-rotation/README.md)（C++）：增强了
   mpv 的旋转功能，支持 360 度循环。
 - [enhanced-seek](plugins/enhanced-seek/README.md)（Lua）：修改了 mpv 的快进/
   快退显示。
 - [enhanced-volume](plugins/enhanced-volume/README.md)（C++）：修改了 mpv 的
   音量调整逻辑及显示，支持长按连续变化。
+- [split-zoom-box](plugins/split-zoom-box/README.md)（C++）：tmux 式分屏放大，
+  把画面切成多个窗格、每格显示同一路解码的不同区域并共用同一条时间轴；
+  分屏布局可按时间段生效并存档。单窗格时即原 drag-zoom-box 的框选放大，
+  并已并入原 enhanced-drag 的拖拽平移。
 - [uosc](plugins/uosc/README.md)（Lua）：替代 mpv 内置 `osc.lua` 的完整
   OSD 皮肤 + 菜单系统，本地只保留进度条并集成了 enhanced-ab-loop 的多段
   循环展示。
@@ -74,7 +73,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 也可以直接运行某个插件的测试可执行文件（支持 Catch2 原生的 `--list-tests`、
-按标签 `"[enhanced-drag]"` 过滤等用法）：
+按标签 `"[layout]"` 过滤等用法）：
 
 ```sh
 build/plugins/<插件名>/tests/<插件名>-tests

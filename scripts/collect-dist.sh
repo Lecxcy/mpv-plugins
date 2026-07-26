@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 编译完成后，把 config/、已完成 C++ 重写的插件构建物（.so）与纯 Lua 插件
+# 编译完成后，把 config/、已完成 C++ 重写的插件构建物（.so/.dll）与纯 Lua 插件
 # （目前是 uosc、thumbfast）收集到一个可直接交给 mpv 使用的目录（默认
 # dist/），方便本地测试或分发。
 #
@@ -30,7 +30,15 @@ dist_dir="${2:-dist}"
 [[ "${build_dir}" != /* ]] && build_dir="${repo_root}/${build_dir}"
 [[ "${dist_dir}" != /* ]] && dist_dir="${repo_root}/${dist_dir}"
 
-# 已完成 C++ 重写的插件；名字与 CMake target 名 / .so 文件名一致。
+# mpv 按后缀识别 C 插件，且各平台只认一种：Windows 上是 .dll，其余（含 macOS）
+# 是 .so（见 mpv player/scripting.c 里 mp_scripting_cplugin 的 file_ext）。CMake
+# 的 MODULE 目标产物后缀刚好也是这个规律，所以两边用同一个变量即可。
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) module_ext="dll" ;;
+    *) module_ext="so" ;;
+esac
+
+# 已完成 C++ 重写的插件；名字与 CMake target 名 / 构建产物文件名一致。
 cpp_plugins=(enhanced-rotation split-zoom-box enhanced-ab-loop enhanced-seek enhanced-volume)
 
 # 直接分发的纯 Lua 插件。每个名字对应 plugins/<name>/lua：如果里面有
@@ -42,8 +50,8 @@ lua_plugins=(uosc thumbfast)
 
 missing=()
 for name in "${cpp_plugins[@]}"; do
-    if [[ ! -f "${build_dir}/plugins/${name}/${name}.so" ]]; then
-        missing+=("${build_dir}/plugins/${name}/${name}.so")
+    if [[ ! -f "${build_dir}/plugins/${name}/${name}.${module_ext}" ]]; then
+        missing+=("${build_dir}/plugins/${name}/${name}.${module_ext}")
     fi
 done
 if (( ${#missing[@]} > 0 )); then
@@ -60,7 +68,8 @@ cp "${repo_root}/config/mpv.conf" "${dist_dir}/mpv.conf"
 
 for name in "${cpp_plugins[@]}"; do
     mkdir -p "${dist_dir}/plugins/${name}"
-    cp "${build_dir}/plugins/${name}/${name}.so" "${dist_dir}/plugins/${name}/${name}.so"
+    cp "${build_dir}/plugins/${name}/${name}.${module_ext}" \
+        "${dist_dir}/plugins/${name}/${name}.${module_ext}"
 done
 
 for name in "${lua_plugins[@]}"; do
@@ -88,7 +97,7 @@ done
     echo "# 以下由 scripts/collect-dist.sh 自动生成，加载已完成 C++ 重写的插件。"
     echo "# ~~home/ 会展开为当前生效的配置目录（见 mpv --config-dir）。"
     for name in "${cpp_plugins[@]}"; do
-        echo "scripts-append=~~home/plugins/${name}/${name}.so"
+        echo "scripts-append=~~home/plugins/${name}/${name}.${module_ext}"
     done
 } >> "${dist_dir}/mpv.conf"
 

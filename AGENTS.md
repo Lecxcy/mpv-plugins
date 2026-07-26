@@ -152,6 +152,21 @@ endif()
 set_target_properties(<插件名> PROPERTIES PREFIX "")
 ```
 
+### 插件入口点
+
+入口点必须带上 `MPV_EXPORT`（由 `mpv/client.h` 定义，无需自己写平台判断）：
+
+```cpp
+extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *handle) {
+```
+
+不能省。上面的 `MPV_CPLUGIN_DYNAMIC_SYM` 会让 `client.h` 生成一批带
+`__declspec(dllexport)` 的 `pfn_*` 函数指针，而 MinGW 链接器只在"没有任何符号
+被显式导出"时才自动导出全部符号——这批指针正好关掉了那个默认行为，于是入口点
+悄悄进不了导出表，mpv 那边 `dlsym` 失败后只报一句 `C plugin error`，看不出真正
+原因。`MPV_EXPORT` 在 Linux/macOS 上展开为 `visibility("default")`，是当前的默认
+行为，加上它不改变现状，同时也防住以后万一给项目加 `-fvisibility=hidden`。
+
 ### 单元测试
 
 测试框架统一用 [Catch2](https://github.com/catchorg/Catch2)。按上面「`external/`

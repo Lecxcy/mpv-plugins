@@ -1020,7 +1020,12 @@ void handle_client_message(PluginState &state, mpv_event_client_message *message
 
 } // namespace
 
-extern "C" int mpv_open_cplugin(mpv_handle *handle) {
+// 必须显式导出：定义 MPV_CPLUGIN_DYNAMIC_SYM 后，client.h 会生成一批带
+// dllexport 的 pfn_* 函数指针，而 MinGW 链接器只在"没有任何符号被显式导出"时
+// 才自动导出全部符号，这批指针正好关掉了那个默认行为——入口点会悄悄进不了导出
+// 表，mpv 那边 dlsym 失败只报一句 "C plugin error"。MPV_EXPORT 在 Windows 上
+// 展开为 __declspec(dllexport)，在 Linux/macOS 上是 visibility("default")。
+extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *handle) {
     PluginState state;
     state.handle = handle;
 

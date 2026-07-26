@@ -43,6 +43,23 @@ git clone --recurse-submodules <仓库地址>
 git submodule update --init --recursive
 ```
 
+## 构建环境要求
+
+- CMake **3.28+**（顶层 `CMakeLists.txt` 用到 `FetchContent_Declare(...
+  EXCLUDE_FROM_ALL)`）。注意 Ubuntu 22.04（3.22）和 Debian 12（3.25）自带的版本
+  太旧，需要用 Kitware 的 apt 源；Ubuntu 24.04 自带 3.28 可以直接用。
+- 能被 pkg-config 找到的 libmpv 开发包（提供 `mpv.pc`）：macOS `brew install mpv`、
+  Debian/Ubuntu `apt install libmpv-dev`。
+- 支持 C++20 的编译器。项目用 fmt 而非 `std::format`，所以 GCC 11+ / Clang 14+
+  就够，不需要很新的工具链。
+- **配置阶段需要联网**：Catch2、fmt、nlohmann_json 由 `FetchContent` 在 configure
+  时从 GitHub 拉取（固定 tag），没有 vendored 兜底。首次在新机器上构建前请确认
+  能访问 GitHub。
+
+Windows 上请使用 **MSYS2/MinGW-w64**（`pacman -S mingw-w64-ucrt-x86_64-mpv
+mingw-w64-ucrt-x86_64-cmake`）：`pkg_check_modules` 需要 pkg-config 和 `mpv.pc`，
+而 vcpkg 目前没有官方 mpv port；`scripts/collect-dist.sh` 也需要 bash。
+
 ## 构建 C++ 插件
 
 配置并构建整个项目：
@@ -63,6 +80,10 @@ cmake --build build --target <插件名>
 ```text
 build/plugins/<插件名>/<插件名>.so
 ```
+
+mpv 按后缀识别 C 插件，且各平台只认一种：Windows 上产物与加载名都是 `.dll`，
+macOS 和 Linux 都是 `.so`（macOS 不是 `.dylib`）。下文提到 `.so` 的地方在
+Windows 上都对应 `.dll`，`scripts/collect-dist.sh` 会自动按平台处理。
 
 ## 运行单元测试
 

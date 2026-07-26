@@ -161,40 +161,116 @@ TEST_CASE("crop 参数落在源画面范围内且不为零", "[layout][graph]") 
     REQUIRE(graph.find(":0:") != std::string::npos); // 完整画面那格的 x 偏移是 0
 }
 
-TEST_CASE("摆放参数全部偶数对齐（yuv420p 回归）", "[layout][graph][even]") {
-    // yuv420p 色度 2x2 子采样：pad 会把尺寸按 2 对齐后再校验 padded >= input，
-    // 出现奇数就报 "Padded dimensions cannot be smaller than input dimensions"；
-    // 高度为 1 的 crop 则让色度平面高度变成 0。所以 crop/scale/pad 的尺寸与
-    // 偏移必须全是偶数、且不小于 2。
+TEST_CASE("默认视口外扩成窗格比例：完整画面 + 黑边", "[layout][view]") {
+    // 1280x720 的画面进 640x720 的窄窗格：视口要在**垂直方向外扩**，
+    // 才能在保持比例的前提下把整幅画面装下，多出来的就是上下黑边。
+    PixelRect pane{0, 0, 640, 720};
+    Region v = fit_view_aspect(Region{}, 1280, 720, pane, true);
+    REQUIRE(v.width() == Catch::Approx(1.0));  // 水平不动，整幅都在
+    REQUIRE(v.height() > 1.0);                  // 垂直外扩出黑边
+    // 视口宽高比（按源像素算）等于窗格比例
+    double ar = (v.width() * 1280) / (v.height() * 720);
+    REQUIRE(ar == Catch::Approx(640.0 / 720.0));
+    // 以中心为基准
+    REQUIRE(v.y1 == Catch::Approx(1.0 - v.y2));
+}
+
+TEST_CASE("框选内缩成窗格比例：占满窗格、裁掉多余", "[layout][view]") {
+    PixelRect pane{0, 0, 640, 720};
+    // 一个比窗格更"宽"的选区，内缩时应当削掉宽度
+    Region picked{0.2, 0.4, 0.8, 0.6};
+    Region v = fit_view_aspect(picked, 1280, 720, pane, false);
+    REQUIRE(v.height() == Catch::Approx(picked.height())); // 高度不动
+    REQUIRE(v.width() < picked.width());                    // 宽度被削
+    double ar = (v.width() * 1280) / (v.height() * 720);
+    REQUIRE(ar == Catch::Approx(640.0 / 720.0));
+}
+
+TEST_CASE("视口坐标映射不夹取，黑边能一起放大（回归）", "[layout][view]") {
+    // 默认视口在垂直方向超出了 [0,1]，窗格顶端对应的是画面之外的黑边
+    PixelRect pane{0, 0, 640, 720};
+    Region v = fit_view_aspect(Region{}, 1280, 720, pane, true);
+    double top = view_to_source_v(v, 0.0);
+    REQUIRE(top < 0.0); // 落在画面之外 —— 不被夹到 0
+    double bottom = view_to_source_v(v, 1.0);
+    REQUIRE(bottom > 1.0);
+    // 中点仍是画面中心
+    REQUIRE(view_to_source_v(v, 0.5) == Catch::Approx(0.5));
+
+    // 框住上半个窗格（含黑边）时，得到的视口也应当含画面之外的部分
+    Region picked;
+    picked.x1 = view_to_source_u(v, 0.0);
+    picked.x2 = view_to_source_u(v, 1.0);
+    picked.y1 = view_to_source_v(v, 0.0);
+    picked.y2 = view_to_source_v(v, 0.5);
+    REQUIRE(picked.y1 < 0.0);
+}
+
+TEST_CASE("平移视口不受任何限制", "[layout][view][pan]") {
+    Region v{0.0, 0.0, 1.0, 1.0};
+    Region moved = translate_view(v, 2.5, -1.5);
+    REQUIRE(moved.x1 == Catch::Approx(2.5));
+    REQUIRE(moved.y1 == Catch::Approx(-1.5));
+    REQUIRE(moved.width() == Catch::Approx(v.width())); // 大小不变
+    // 完整画面也能挪（早期版本这里会被夹死、拖不动）
+    REQUIRE(moved.x1 != Catch::Approx(0.0));
+}
+
+TEST_CASE("视口合法性允许越界但挡住离谱值", "[layout][view]") {
+    REQUIRE(view_valid(Region{-0.5, -0.5, 1.5, 1.5}));  // 越界是正常的
+    REQUIRE_FALSE(view_valid(Region{0.5, 0.0, 0.5, 1.0})); // 零宽
+    REQUIRE_FALSE(view_valid(Region{0.0, 0.0, 100.0, 1.0})); // 大到没意义
+}
+
+TEST_CASE("滤镜参数全部偶数对齐（yuv420p 回归）", "[layout][graph][even]") {
+    // yuv420p 色度 2x2 子采样：奇数会让 pad 的 "padded >= input" 校验在对齐后
+    // 失败，高度 1 的 crop 会让色度平面高度变成 0（见 SPEC §6.9）。
     for (double w : {0.02, 0.005, 0.3, 0.0008}) {
         for (double h : {0.02, 0.002, 0.3}) {
             Layout layout = make_layout();
             REQUIRE(split_focused(layout, SplitDir::kHorizontal));
             REQUIRE(set_focused_region(layout, Region{0.3, 0.3, 0.3 + w, 0.3 + h}));
-            std::vector<PixelRect> panes = compute_pane_rects(layout, 1280, 720);
-            PanePlacement p = compute_placement(layout.nodes[leaf_order(layout)[0]].region, 0.0, 0.0, 1280,
-                                                 720, panes[0]);
-            REQUIRE(p.content_w % 2 == 0);
-            REQUIRE(p.content_h % 2 == 0);
-            REQUIRE(p.content_x % 2 == 0);
-            REQUIRE(p.content_y % 2 == 0);
-            REQUIRE(p.content_w >= 2);
-            REQUIRE(p.content_h >= 2);
-            // 缩放比封顶：不能算出几十万像素宽的中间帧
-            REQUIRE(p.content_w <= 8192);
-            REQUIRE(p.content_h <= 8192);
+            std::string g = build_filter_graph(layout, 1280, 720, 1280, 720);
+            REQUIRE_FALSE(g.empty());
+            // 抓出所有 crop/pad/scale 的数字，逐个确认是偶数
+            for (const std::string &kw : {std::string("crop="), std::string("pad="), std::string("scale=")}) {
+                for (std::size_t pos = g.find(kw); pos != std::string::npos; pos = g.find(kw, pos + 1)) {
+                    std::size_t start = pos + kw.size();
+                    std::size_t stop = g.find_first_of(",;[", start);
+                    std::string args = g.substr(start, stop - start);
+                    std::size_t f = 0;
+                    while (f < args.size()) {
+                        std::size_t colon = args.find(':', f);
+                        std::string num = args.substr(f, colon == std::string::npos ? colon : colon - f);
+                        if (!num.empty() && num.find_first_not_of("-0123456789") == std::string::npos) {
+                            REQUIRE(std::stoi(num) % 2 == 0);
+                        }
+                        if (colon == std::string::npos) {
+                            break;
+                        }
+                        f = colon + 1;
+                    }
+                }
+            }
         }
     }
 }
 
 TEST_CASE("窗格小于 2 像素时不下发滤镜图", "[layout][graph]") {
-    // 1 像素宽的窗格在 yuv420p 下必然让最后的 crop 失败，宁可不下发
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kHorizontal));
     REQUIRE(build_filter_graph(layout, 1280, 720, 2, 720).empty());
     REQUIRE(build_filter_graph(layout, 1280, 720, 640, 1).empty());
-    // 正常尺寸照常产出
     REQUIRE_FALSE(build_filter_graph(layout, 1280, 720, 1280, 720).empty());
+}
+
+TEST_CASE("视口完全移出画面时窗格全黑", "[layout][view][graph]") {
+    Layout layout = make_layout();
+    REQUIRE(split_focused(layout, SplitDir::kHorizontal));
+    REQUIRE(set_focused_region(layout, Region{5.0, 0.0, 6.0, 1.0})); // 挪到画面右侧很远
+    std::string g = build_filter_graph(layout, 1280, 720, 1280, 720);
+    REQUIRE_FALSE(g.empty());
+    REQUIRE(g.find("drawbox") != std::string::npos); // 整片涂黑
 }
 
 TEST_CASE("hit_test 命中正确窗格并给出窗格内坐标", "[layout][hit]") {
@@ -233,66 +309,6 @@ TEST_CASE("窗格内框选换算回源坐标（坐标反查往返）", "[layout]
     REQUIRE(flipped.x2 == Catch::Approx(result.x2));
 }
 
-TEST_CASE("未放大时完整画面按原比例整个显示（补黑）", "[layout][placement]") {
-    // 1280x720 的完整画面塞进 640x720 的窄窗格：取较小缩放比 0.5 ->
-    // 内容 640x360，垂直居中，上下各留 180 黑边。
-    PixelRect pane{0, 0, 640, 720};
-    PanePlacement p = compute_placement(Region{}, 0.0, 0.0, 1280, 720, pane);
-    REQUIRE(p.content_w == 640);
-    REQUIRE(p.content_h == 360);
-    REQUIRE(p.content_x == 0);
-    REQUIRE(p.content_y == 180);
-    REQUIRE(static_cast<double>(p.content_w) / p.content_h == Catch::Approx(1280.0 / 720.0));
-}
-
-TEST_CASE("放大后占满窗格", "[layout][placement]") {
-    PixelRect pane{0, 0, 640, 720};
-    // 源画面中间一小块 256x144，取较大缩放比 5 -> 内容 1280x720，
-    // 宽度溢出窗格、左右各被裁掉 320。
-    PanePlacement p = compute_placement(Region{0.2, 0.2, 0.4, 0.4}, 0.0, 0.0, 1280, 720, pane);
-    REQUIRE(p.content_h == 720);
-    REQUIRE(p.content_w == 1280);
-    REQUIRE(p.content_x == -320);
-    REQUIRE(p.content_y == 0);
-    REQUIRE(p.content_w >= pane.w);
-    REQUIRE(p.content_h >= pane.h);
-}
-
-TEST_CASE("位移不受限制，可以把画面整个拖出窗格", "[layout][placement][pan]") {
-    PixelRect pane{0, 0, 640, 720};
-    PanePlacement p = compute_placement(Region{}, 1.0, 0.0, 1280, 720, pane);
-    REQUIRE(p.content_x == 640); // 正好推到窗格右边缘之外
-    PanePlacement far = compute_placement(Region{}, 5.0, -3.0, 1280, 720, pane);
-    REQUIRE(far.content_x == 640 * 5);
-    REQUIRE(far.content_y == 180 - 720 * 3);
-}
-
-TEST_CASE("坐标反查还原缩放、居中与位移", "[layout][placement]") {
-    PixelRect pane{0, 0, 640, 720};
-    PanePlacement p = compute_placement(Region{}, 0.0, 0.0, 1280, 720, pane);
-    // 内容纵向占 180..540
-    REQUIRE(placement_to_region_v(p, 180.0) == Catch::Approx(0.0));
-    REQUIRE(placement_to_region_v(p, 540.0) == Catch::Approx(1.0));
-    REQUIRE(placement_to_region_v(p, 360.0) == Catch::Approx(0.5));
-    // 黑边上的点夹到边界，不会算出界外值
-    REQUIRE(placement_to_region_v(p, 0.0) == Catch::Approx(0.0));
-    REQUIRE(placement_to_region_v(p, 719.0) == Catch::Approx(1.0));
-
-    // 有位移时反查要把位移减回去
-    PanePlacement moved = compute_placement(Region{}, 0.0, 0.25, 1280, 720, pane);
-    REQUIRE(moved.content_y == 360);
-    REQUIRE(placement_to_region_v(moved, 360.0) == Catch::Approx(0.0));
-}
-
-TEST_CASE("换区域时重置位移", "[layout][placement]") {
-    Layout layout = make_layout();
-    layout.nodes[0].offset_x = 0.4;
-    layout.nodes[0].offset_y = -0.2;
-    REQUIRE(set_focused_region(layout, Region{0.1, 0.1, 0.5, 0.5}));
-    REQUIRE(layout.nodes[0].offset_x == Catch::Approx(0.0));
-    REQUIRE(layout.nodes[0].offset_y == Catch::Approx(0.0));
-}
-
 TEST_CASE("关闭窗格后兄弟顶替父节点", "[layout]") {
     Layout layout = make_layout();
     REQUIRE(split_focused(layout, SplitDir::kHorizontal));
@@ -327,10 +343,14 @@ TEST_CASE("focus_next 在所有窗格间循环", "[layout]") {
     REQUIRE(layout.focused == leaves[0]); // 绕回起点
 }
 
-TEST_CASE("set_focused_region 拒绝退化区域", "[layout]") {
+TEST_CASE("set_focused_region 拒绝退化视口但允许越界", "[layout][view]") {
     Layout layout = make_layout();
-    REQUIRE_FALSE(set_focused_region(layout, Region{0.5, 0.5, 0.5, 0.9}));  // 零宽
-    REQUIRE_FALSE(set_focused_region(layout, Region{0.5, 0.5, 0.9, 0.5}));  // 零高
-    REQUIRE_FALSE(set_focused_region(layout, Region{-0.1, 0.0, 0.5, 0.5})); // 越界
+    REQUIRE_FALSE(set_focused_region(layout, Region{0.5, 0.5, 0.5, 0.9})); // 零宽
+    REQUIRE_FALSE(set_focused_region(layout, Region{0.5, 0.5, 0.9, 0.5})); // 零高
+    // 越界在视口模型下是**合法**的：超出源画面的部分就是黑边。
+    // （旧模型把它当非法，于是框选框不到黑边、也没法把画面拖出窗格。）
+    REQUIRE(set_focused_region(layout, Region{-0.1, 0.0, 0.5, 0.5}));
     REQUIRE(set_focused_region(layout, Region{0.1, 0.1, 0.9, 0.9}));
+    // 但离谱的量级仍然挡掉
+    REQUIRE_FALSE(set_focused_region(layout, Region{0.0, 0.0, 100.0, 1.0}));
 }

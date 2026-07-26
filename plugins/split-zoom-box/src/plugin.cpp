@@ -417,6 +417,12 @@ bool apply_layout(PluginState &state, bool force = false) {
 
         std::vector<int> leaves = leaf_order(layout);
         Region region = leaves.empty() ? Region{} : layout.nodes[leaves.front()].region;
+        // 多窗格的视口可能超出源画面（黑边），关到只剩一格后要夹回画面内：
+        // 单窗格走的是 video-zoom，那条路径没有"画布上的黑色背景"这个概念。
+        region.x1 = std::clamp(region.x1, 0.0, 1.0);
+        region.y1 = std::clamp(region.y1, 0.0, 1.0);
+        region.x2 = std::clamp(region.x2, region.x1 + kRegionEpsilon, 1.0);
+        region.y2 = std::clamp(region.y2, region.y1 + kRegionEpsilon, 1.0);
         if (region_is_full(region)) {
             reset_zoom_pan(state);
         } else {
@@ -468,7 +474,7 @@ void clear_all_output(PluginState &state) {
 // 缩放产生的黑边）。坐标反查必须用后者。
 struct PaneRects {
     PixelRect pane;
-    PanePlacement placement; // 内容在窗格里的缩放与摆放
+    Region view; // 该窗格的有效视口（宽高比已对齐窗格）
 };
 
 std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &layout, int leaf) {
@@ -487,9 +493,7 @@ std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &lay
     }
     PaneRects out;
     out.pane = rects[static_cast<std::size_t>(it - leaves.begin())];
-    const Node &node = layout.nodes[leaf];
-    out.placement =
-        compute_placement(node.region, node.offset_x, node.offset_y, size->src_w, size->src_h, out.pane);
+    out.view = fit_view_aspect(layout.nodes[leaf].region, size->src_w, size->src_h, out.pane, true);
     return out;
 }
 
@@ -625,26 +629,27 @@ bool apply_drag_selection(PluginState &state, const Box &box, bool reset) {
         return false;
     }
 
-    // 内容在窗格里的缩放比、居中量和拖拽位移都要还原回去，才能把屏幕位置
-    // 换算成"区域内的归一化坐标"。
-    const PanePlacement &place = rects->placement;
+    // 视口到窗格是精确的线性映射，**不夹取**：框到黑边上就该算出画面之外的
+    // 坐标，这样黑边才会跟着一起放大。
+    const Region &view = rects->view;
     auto to_pane_u = [&](double canvas_u) {
-        return placement_to_region_u(place, canvas_u * size->canvas_w - rect.x);
+        return view_to_source_u(view, (canvas_u * size->canvas_w - rect.x) / rect.w);
     };
     auto to_pane_v = [&](double canvas_v) {
-        return placement_to_region_v(place, canvas_v * size->canvas_h - rect.y);
+        return view_to_source_v(view, (canvas_v * size->canvas_h - rect.y) / rect.h);
     };
 
-    double u1 = to_pane_u(canvas_box->x1);
-    double u2 = to_pane_u(canvas_box->x2);
-    double v1 = to_pane_v(canvas_box->y1);
-    double v2 = to_pane_v(canvas_box->y2);
-    if (u2 - u1 <= 0.0 || v2 - v1 <= 0.0) {
+    Region picked;
+    picked.x1 = to_pane_u(canvas_box->x1);
+    picked.x2 = to_pane_u(canvas_box->x2);
+    picked.y1 = to_pane_v(canvas_box->y1);
+    picked.y2 = to_pane_v(canvas_box->y2);
+    if (picked.width() <= 0.0 || picked.height() <= 0.0) {
         return false;
     }
-
-    Region pane_region = layout.nodes[hit->leaf].region;
-    return set_focused_region(layout, subregion(pane_region, u1, v1, u2, v2));
+    // 内缩到窗格比例：占满窗格、裁掉多余（"用 max、裁掉溢出"这个已确认的取舍）。
+    return set_focused_region(layout,
+                              fit_view_aspect(picked, size->src_w, size->src_h, rects->pane, false));
 }
 
 // ---- 平移（合并自 enhanced-drag）----
@@ -743,11 +748,14 @@ void pan_update(PluginState &state) {
         return;
     }
 
-    // 直接移动内容在窗格里的位移：画面跟着鼠标走，且**不做任何范围限制**，
-    // 可以把画面整个拖出窗格（与单窗格路径的行为一致），空出来的地方补黑。
+    // 平移视口：画面跟着鼠标走（视口反向移动），**不做任何范围限制**，
+    // 可以把画面整个拖出窗格，空出来的地方是黑的。
     Node &node = layout.nodes[state.pan_leaf];
-    node.offset_x += dx / pw;
-    node.offset_y += dy / ph;
+    const Region &view = rects->view;
+    Region moved = translate_view(view, -(dx / pw) * view.width(), -(dy / ph) * view.height());
+    if (view_valid(moved)) {
+        node.region = moved;
+    }
 
     // 多窗格平移要重建滤镜链，60Hz 重建会明显卡顿，这里限流到 ~16fps；
     // 松开鼠标时无条件补一次，保证最终位置准确。

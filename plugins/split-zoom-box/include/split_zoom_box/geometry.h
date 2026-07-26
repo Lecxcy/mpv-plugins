@@ -53,6 +53,13 @@ inline constexpr double kRegionEpsilon = 1e-9;
 bool region_valid(const Region &region);
 bool region_is_full(const Region &region);
 
+// 视口的合法性：只要求有正的宽高、且量级不离谱。**不要求落在 [0,1] 内**
+// ——视口看的是"源画面 + 无限黑色背景"，超出画面的部分就是黑色，这是正常
+// 状态而不是错误。上限是防呆：视口大到几十倍画面时滤镜要处理的中间帧会
+// 大到没有意义。
+bool view_valid(const Region &view);
+inline constexpr double kMaxViewExtent = 32.0;
+
 // 视频当前实际渲染到窗口里的矩形区域 + 缩放为 0（完整贴合窗口）时的基准
 // 尺寸。多窗格生效时，这个"视频"指的是拼接后的画布。
 struct Geometry {

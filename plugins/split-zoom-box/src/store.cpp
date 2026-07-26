@@ -44,7 +44,8 @@ Region region_from_json(const nlohmann::json &item) {
     region.y1 = item[1].get<double>();
     region.x2 = item[2].get<double>();
     region.y2 = item[3].get<double>();
-    if (!region_valid(region)) {
+    // 存的是视口，可以超出 [0,1]（超出的部分是黑边），只挡明显坏掉的值。
+    if (!view_valid(region)) {
         return Region{};
     }
     return region;
@@ -57,13 +58,9 @@ nlohmann::json node_to_json(const Layout &layout, int index) {
     }
     const Node &node = layout.nodes[index];
     if (node.leaf) {
-        nlohmann::json leaf = {{"leaf", true}, {"region", region_to_json(node.region)}};
-        // 位移只在非零时写出，省得每个叶子都拖两个 0.0；老存档没有这两个字段
-        // 时读回来自然是 0（居中），向后兼容不需要迁移。
-        if (node.offset_x != 0.0 || node.offset_y != 0.0) {
-            leaf["offset"] = nlohmann::json::array({node.offset_x, node.offset_y});
-        }
-        return leaf;
+        // 老存档里可能有 "offset" 字段（早期的"区域 + 位移"模型），读的时候
+        // 直接忽略：视口模型已经把位移并进区域本身了。
+        return {{"leaf", true}, {"region", region_to_json(node.region)}};
     }
     return {{"leaf", false},
             {"dir", node.dir == SplitDir::kHorizontal ? "h" : "v"},
@@ -78,11 +75,6 @@ int node_from_json(Layout &layout, const nlohmann::json &item) {
         node.leaf = true;
         if (item.is_object() && item.contains("region")) {
             node.region = region_from_json(item["region"]);
-        }
-        if (item.is_object() && item.contains("offset") && item["offset"].is_array() &&
-            item["offset"].size() == 2 && item["offset"][0].is_number() && item["offset"][1].is_number()) {
-            node.offset_x = item["offset"][0].get<double>();
-            node.offset_y = item["offset"][1].get<double>();
         }
         layout.nodes.push_back(node);
         return static_cast<int>(layout.nodes.size()) - 1;

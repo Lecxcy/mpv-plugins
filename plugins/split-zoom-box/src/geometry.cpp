@@ -44,6 +44,18 @@ bool region_valid(const Region &region) {
            region.height() > kRegionEpsilon;
 }
 
+bool view_valid(const Region &view) {
+    if (!(view.width() > kRegionEpsilon) || !(view.height() > kRegionEpsilon)) {
+        return false;
+    }
+    if (view.width() > kMaxViewExtent || view.height() > kMaxViewExtent) {
+        return false;
+    }
+    // 位置也要防呆：拖得再远也不该离画面几十倍远。
+    return std::abs(view.x1) <= kMaxViewExtent && std::abs(view.y1) <= kMaxViewExtent &&
+           std::abs(view.x2) <= kMaxViewExtent && std::abs(view.y2) <= kMaxViewExtent;
+}
+
 bool region_is_full(const Region &region) {
     return region.x1 <= kRegionEpsilon && region.y1 <= kRegionEpsilon && region.x2 >= 1.0 - kRegionEpsilon &&
            region.y2 >= 1.0 - kRegionEpsilon;

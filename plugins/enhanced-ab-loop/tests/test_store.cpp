@@ -27,6 +27,13 @@ TEST_CASE("compute_content_hash differs when head or tail sample differs", "[sto
     CHECK(base != compute_content_hash(1000, "head-a", "tail-b"));
 }
 
+// 存档文件名就是这个哈希，所以它是一份跨版本、跨平台的持久格式：值变了，用户
+// 已有的存档全都读不到。这里钉死一个已知输入的期望值，任何会改变哈希的改动
+// （包括在大端机器上编译）都会在这里失败，而不是等到用户存档丢失才发现。
+TEST_CASE("compute_content_hash matches its pinned value across platforms", "[store][hash]") {
+    CHECK(compute_content_hash(1234, "head-bytes", "tail-bytes") == "b0003a734c22686b");
+}
+
 TEST_CASE("extract_filename strips leading directory components", "[store][filename]") {
     CHECK(extract_filename("/home/alice/videos/movie.mp4") == "movie.mp4");
     CHECK(extract_filename("C:\\Users\\alice\\videos\\movie.mp4") == "movie.mp4"); // Windows 反斜杠

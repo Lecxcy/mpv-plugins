@@ -179,6 +179,13 @@ TEST_CASE("哈希稳定且区分文件大小", "[store]") {
     REQUIRE(store::compute_content_hash(100, "head", "tail").size() == 16);
 }
 
+// 存档文件名就是这个哈希，所以它是一份跨版本、跨平台的持久格式：值变了，用户
+// 已有的存档全都读不到。这里钉死一个已知输入的期望值，任何会改变哈希的改动
+// （包括在大端机器上编译）都会在这里失败，而不是等到用户存档丢失才发现。
+TEST_CASE("哈希值跨平台钉死", "[store]") {
+    REQUIRE(store::compute_content_hash(100, "head", "tail") == "9734c78f7cc005a5");
+}
+
 TEST_CASE("extract_filename 认两种分隔符且不含目录", "[store]") {
     REQUIRE(store::extract_filename("/home/user/movies/a.mkv") == "a.mkv");
     REQUIRE(store::extract_filename(R"(C:\videos\b.mp4)") == "b.mp4");

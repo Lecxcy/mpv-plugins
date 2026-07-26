@@ -16,6 +16,18 @@ std::uint64_t fnv1a_64(std::string_view data, std::uint64_t hash) {
     return hash;
 }
 
+// 把一个 64 位整数按固定的小端字节序喂给哈希。直接 reinterpret_cast 整数的
+// 内存表示会让哈希值跟着机器字节序走，同一份存档目录搬到字节序不同的机器上
+// 就整个失配。固定成小端而不是大端，是为了跟已有存档（x86/ARM 都是小端）算
+// 出同样的值，不需要迁移。
+std::uint64_t fnv1a_64_le(std::uint64_t value, std::uint64_t hash) {
+    for (std::size_t i = 0; i < sizeof(value); ++i) {
+        hash ^= static_cast<unsigned char>((value >> (i * 8)) & 0xFF);
+        hash *= 0x100000001b3ULL; // FNV prime
+    }
+    return hash;
+}
+
 std::string to_hex16(std::uint64_t value) {
     static constexpr char kHex[] = "0123456789abcdef";
     std::string result(16, '0');
@@ -170,8 +182,7 @@ std::string compute_content_hash(std::uint64_t file_size, std::string_view head_
     // FNV-1a 64 位，不追求密码学强度，只要求对不同视频文件碰撞概率低到可以
     // 忽略。文件大小也参与哈希，避免头尾字节恰好相同、大小不同的文件撞车。
     std::uint64_t hash = 0xcbf29ce484222325ULL;
-    std::string_view size_bytes(reinterpret_cast<const char *>(&file_size), sizeof(file_size));
-    hash = fnv1a_64(size_bytes, hash);
+    hash = fnv1a_64_le(file_size, hash);
     hash = fnv1a_64(head_sample, hash);
     hash = fnv1a_64(tail_sample, hash);
     return to_hex16(hash);

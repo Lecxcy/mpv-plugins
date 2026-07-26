@@ -468,7 +468,7 @@ void clear_all_output(PluginState &state) {
 // 缩放产生的黑边）。坐标反查必须用后者。
 struct PaneRects {
     PixelRect pane;
-    Region visible; // 窗格里实际看得到的那部分区域（归一化到 region 自身）
+    PanePlacement placement; // 内容在窗格里的缩放与摆放
 };
 
 std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &layout, int leaf) {
@@ -487,7 +487,9 @@ std::optional<PaneRects> pane_canvas_rects(PluginState &state, const Layout &lay
     }
     PaneRects out;
     out.pane = rects[static_cast<std::size_t>(it - leaves.begin())];
-    out.visible = pane_visible_fraction(layout.nodes[leaf].region, size->src_w, size->src_h, out.pane);
+    const Node &node = layout.nodes[leaf];
+    out.placement =
+        compute_placement(node.region, node.offset_x, node.offset_y, size->src_w, size->src_h, out.pane);
     return out;
 }
 
@@ -623,17 +625,14 @@ bool apply_drag_selection(PluginState &state, const Box &box, bool reset) {
         return false;
     }
 
-    // 画面铺满整个窗格，所以先按窗格归一化；但窗格里看到的只是区域的一个
-    // 居中子矩形（超出窗格比例的部分被裁掉了），所以还要再经可见比例折算回
-    // 区域自身的坐标——少了这一步，框选位置会随裁掉的比例整体算偏。
-    const Region &vis = rects->visible;
+    // 内容在窗格里的缩放比、居中量和拖拽位移都要还原回去，才能把屏幕位置
+    // 换算成"区域内的归一化坐标"。
+    const PanePlacement &place = rects->placement;
     auto to_pane_u = [&](double canvas_u) {
-        double u = std::clamp((canvas_u * size->canvas_w - rect.x) / rect.w, 0.0, 1.0);
-        return vis.x1 + u * vis.width();
+        return placement_to_region_u(place, canvas_u * size->canvas_w - rect.x);
     };
     auto to_pane_v = [&](double canvas_v) {
-        double v = std::clamp((canvas_v * size->canvas_h - rect.y) / rect.h, 0.0, 1.0);
-        return vis.y1 + v * vis.height();
+        return placement_to_region_v(place, canvas_v * size->canvas_h - rect.y);
     };
 
     double u1 = to_pane_u(canvas_box->x1);
@@ -690,20 +689,6 @@ void pan_begin(PluginState &state) {
         state.pan_leaf = hit->leaf;
         layout.focused = hit->leaf;
 
-        // 平移前先把区域收敛成"窗格里实际看得到的那部分"。
-        //
-        // 填满式显示会把超出窗格比例的部分裁掉，所以一个铺满整幅画面的区域
-        // （0,0,1,1）在窗格里其实只露出中间一段——左右/上下是有内容没显示
-        // 出来的。但 pan_region 是把区域夹在源画面内的，宽高都是 1 时可移动
-        // 余量正好为 0，于是"未放大时拖不动"。
-        //
-        // 收敛之后区域的宽高比与窗格一致、不再有被裁掉的部分，视觉上完全
-        // 等价（看到的内容一模一样），但有了可平移的余量。
-        if (auto rects = pane_canvas_rects(state, layout, hit->leaf)) {
-            Region &region = layout.nodes[hit->leaf].region;
-            const Region &vis = rects->visible;
-            region = subregion(region, vis.x1, vis.y1, vis.x2, vis.y2);
-        }
         draw_focus_overlay(state);
     }
 }
@@ -758,12 +743,11 @@ void pan_update(PluginState &state) {
         return;
     }
 
-    Region &region = layout.nodes[state.pan_leaf].region;
-    // 画面跟着鼠标走：向右拖 = 看到更靠左的内容 = 区域左移，所以取负号。
-    // 窗格里只看得到区域的一部分（visible），换算要带上这一层。
-    double du = -(dx / pw) * rects->visible.width() * region.width();
-    double dv = -(dy / ph) * rects->visible.height() * region.height();
-    region = pan_region(region, du, dv);
+    // 直接移动内容在窗格里的位移：画面跟着鼠标走，且**不做任何范围限制**，
+    // 可以把画面整个拖出窗格（与单窗格路径的行为一致），空出来的地方补黑。
+    Node &node = layout.nodes[state.pan_leaf];
+    node.offset_x += dx / pw;
+    node.offset_y += dy / ph;
 
     // 多窗格平移要重建滤镜链，60Hz 重建会明显卡顿，这里限流到 ~16fps；
     // 松开鼠标时无条件补一次，保证最终位置准确。

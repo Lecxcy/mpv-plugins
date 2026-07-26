@@ -20,7 +20,12 @@ enum class SplitDir {
 // arena 索引存储，nodes[0] 恒为根。叶子 = 一个窗格，内部节点 = 一次分屏。
 struct Node {
     bool leaf = true;
-    Region region;                        // 仅叶子有意义
+    Region region; // 仅叶子有意义：源画面上要显示的区域，始终在 [0,1] 内
+    // 内容在窗格里的额外位移，按窗格尺寸归一化，0 = 居中。
+    // 刻意不做范围限制：拖拽平移要能把画面整个拖出窗格（与单窗格路径下
+    // 承接自 enhanced-drag 的"无边界约束"保持一致），空出来的地方补黑。
+    double offset_x = 0.0;
+    double offset_y = 0.0;
     SplitDir dir = SplitDir::kHorizontal; // 仅内部节点有意义
     int first = -1;
     int second = -1;
@@ -86,20 +91,29 @@ std::vector<PixelRect> compute_pane_rects(const Layout &layout, int canvas_w, in
 std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int canvas_w, int canvas_h,
                                 bool hardware_frames = false);
 
-// 窗格里**实际看得到**的那部分区域，归一化到 region 自身的 [0,1]。
-//
-// 窗格用"放大到填满、裁掉溢出"的方式显示区域（滤镜里的
-// force_original_aspect_ratio=increase + crop），所以当区域的宽高比和窗格
-// 对不上时，窗格里看到的只是区域的一个**居中子矩形**，两侧/上下超出的部分
-// 被裁掉了。
-//
-// 坐标反查必须先经过它：屏幕上量到的位置是相对"看得到的那部分"的，直接当成
-// 相对整个区域会算偏。
-Region pane_visible_fraction(const Region &region, int src_w, int src_h, const PixelRect &pane);
+// 内容在窗格里的摆放结果：区域被缩放成 content_w x content_h，左上角落在
+// 窗格内的 (content_x, content_y)——**可以为负、也可以超出窗格**，表示被拖到
+// 了窗格外面，那部分看不到，窗格里空出来的地方是黑的。
+struct PanePlacement {
+    int content_w = 1;
+    int content_h = 1;
+    int content_x = 0;
+    int content_y = 0;
+};
 
-// 平移区域：按归一化位移移动，保持尺寸不变，并夹在源画面范围内
-// （区域本身就是源画面上的一个窗口，移出去没有内容可显示）。
-Region pan_region(const Region &region, double du, double dv);
+// 缩放规则：
+// - 区域是完整画面（未放大）-> 取**较小**的缩放比，完整画面按原比例整个塞进
+//   窗格，多余处补黑。这是分屏的默认观感。
+// - 区域是框选出来的一块（已放大）-> 取**较大**的缩放比，占满窗格，超出的
+//   部分裁掉。
+PanePlacement compute_placement(const Region &region, double offset_x, double offset_y, int src_w,
+                                 int src_h, const PixelRect &pane);
+
+// 窗格内坐标（相对窗格左上角的像素）-> 区域内归一化坐标。
+// 落在内容之外（黑色区域）时夹到 [0,1]。坐标反查必须走它——缩放比、居中量和
+// 拖拽位移三者都要还原回去。
+double placement_to_region_u(const PanePlacement &placement, double pane_px);
+double placement_to_region_v(const PanePlacement &placement, double pane_py);
 
 struct PaneHit {
     int leaf = -1;  // 命中的叶子节点索引

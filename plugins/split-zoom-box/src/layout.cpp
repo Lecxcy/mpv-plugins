@@ -174,6 +174,9 @@ bool set_focused_region(Layout &layout, const Region &region) {
         return false;
     }
     layout.nodes[layout.focused].region = region;
+    // 换了显示区域就重新居中：上一次拖拽的位移是针对旧区域的，留着没有意义。
+    layout.nodes[layout.focused].offset_x = 0.0;
+    layout.nodes[layout.focused].offset_y = 0.0;
     return true;
 }
 
@@ -239,16 +242,23 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
         CropParams crop = region_to_crop(node.region, src_w, src_h);
         int pw = clamp_positive(rects[i].w);
         int ph = clamp_positive(rects[i].h);
-        // force_original_aspect_ratio=increase + crop：按原比例放大到**填满**
-        // 窗格，超出窗格比例的部分居中裁掉。
-        //
-        // 不用 decrease+pad（保比缩小、补黑边）：那样窗格里会留大片黑边，而
-        // 单窗格路径下同样的框选是"周边画面填满窗口"、看起来是占满的，两条
-        // 路径观感对不上。直接 scale 到窗格尺寸则会把画面拉变形。
-        // 代价是选区超出窗格比例的部分看不到，这是明确选择过的取舍。
-        graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{}:force_original_aspect_ratio=increase,"
-                             "crop={}:{},setsar=1[p{}];",
-                             i, crop.w, crop.h, crop.x, crop.y, pw, ph, pw, ph, i);
+        PanePlacement place =
+            compute_placement(node.region, node.offset_x, node.offset_y, src_w, src_h, rects[i]);
+
+        // 把缩放后的内容摆到窗格里的任意位置（可以部分/完全在窗格外），空出
+        // 来的地方补黑。用 pad 先给内容加上需要的边距，再 crop 出窗格大小的
+        // 窗口——pad 的偏移不能为负，所以负位移由 crop 的起点吸收。
+        int pad_l = std::max(0, place.content_x);
+        int pad_t = std::max(0, place.content_y);
+        int win_x = pad_l - place.content_x; // 恒 >= 0
+        int win_y = pad_t - place.content_y;
+        int pad_w = std::max(place.content_w + pad_l, win_x + pw);
+        int pad_h = std::max(place.content_h + pad_t, win_y + ph);
+
+        graph += fmt::format("[i{}]crop={}:{}:{}:{},scale={}:{},pad={}:{}:{}:{}:black,"
+                             "crop={}:{}:{}:{},setsar=1[p{}];",
+                             i, crop.w, crop.h, crop.x, crop.y, place.content_w, place.content_h, pad_w,
+                             pad_h, pad_l, pad_t, pw, ph, win_x, win_y, i);
     }
 
     // 叶子节点索引 -> 它在 leaves 里的序号，用来查 pN 标签。
@@ -282,41 +292,38 @@ std::string build_filter_graph(const Layout &layout, int src_w, int src_h, int c
     return graph;
 }
 
-Region pane_visible_fraction(const Region &region, int src_w, int src_h, const PixelRect &pane) {
-    Region full;
+PanePlacement compute_placement(const Region &region, double offset_x, double offset_y, int src_w,
+                                 int src_h, const PixelRect &pane) {
+    PanePlacement out;
     if (pane.w <= 0 || pane.h <= 0 || src_w <= 0 || src_h <= 0) {
-        return full;
+        return out;
     }
     CropParams crop = region_to_crop(region, src_w, src_h);
-    // 与滤镜里 force_original_aspect_ratio=increase 一致：两轴所需缩放比取
-    // 较大者，保证填满窗格。
-    double scale = std::max(static_cast<double>(pane.w) / crop.w, static_cast<double>(pane.h) / crop.h);
-    double scaled_w = crop.w * scale;
-    double scaled_h = crop.h * scale;
-    if (scaled_w <= 0.0 || scaled_h <= 0.0) {
-        return full;
-    }
-    // 放大后超出窗格的部分被居中裁掉，可见比例就是窗格尺寸占放大后尺寸的比。
-    double fx = std::clamp(pane.w / scaled_w, 0.0, 1.0);
-    double fy = std::clamp(pane.h / scaled_h, 0.0, 1.0);
+    double fit = std::min(static_cast<double>(pane.w) / crop.w, static_cast<double>(pane.h) / crop.h);
+    double fill = std::max(static_cast<double>(pane.w) / crop.w, static_cast<double>(pane.h) / crop.h);
+    // 未放大时完整画面按原比例整个显示（多余处补黑），放大后才占满窗格。
+    double scale = region_is_full(region) ? fit : fill;
 
-    Region vis;
-    vis.x1 = (1.0 - fx) / 2.0;
-    vis.x2 = vis.x1 + fx;
-    vis.y1 = (1.0 - fy) / 2.0;
-    vis.y2 = vis.y1 + fy;
-    return vis;
+    out.content_w = std::max(1, static_cast<int>(std::lround(crop.w * scale)));
+    out.content_h = std::max(1, static_cast<int>(std::lround(crop.h * scale)));
+    // 先居中，再叠加拖拽位移（按窗格尺寸归一化，不限制范围）。
+    out.content_x = (pane.w - out.content_w) / 2 + static_cast<int>(std::lround(offset_x * pane.w));
+    out.content_y = (pane.h - out.content_h) / 2 + static_cast<int>(std::lround(offset_y * pane.h));
+    return out;
 }
 
-Region pan_region(const Region &region, double du, double dv) {
-    double w = region.width();
-    double h = region.height();
-    Region out;
-    out.x1 = std::clamp(region.x1 + du, 0.0, std::max(0.0, 1.0 - w));
-    out.y1 = std::clamp(region.y1 + dv, 0.0, std::max(0.0, 1.0 - h));
-    out.x2 = out.x1 + w;
-    out.y2 = out.y1 + h;
-    return out;
+double placement_to_region_u(const PanePlacement &placement, double pane_px) {
+    if (placement.content_w <= 0) {
+        return 0.0;
+    }
+    return std::clamp((pane_px - placement.content_x) / placement.content_w, 0.0, 1.0);
+}
+
+double placement_to_region_v(const PanePlacement &placement, double pane_py) {
+    if (placement.content_h <= 0) {
+        return 0.0;
+    }
+    return std::clamp((pane_py - placement.content_y) / placement.content_h, 0.0, 1.0);
 }
 
 std::optional<PaneHit> hit_test(const Layout &layout, int canvas_w, int canvas_h, double cu, double cv) {

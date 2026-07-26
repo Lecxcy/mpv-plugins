@@ -1444,8 +1444,11 @@ void on_load(PluginState &state) {
         state.rename_from = result.matched_key;
         state.paused_before_confirm = mpv_util::get_flag(state.handle, "pause", false);
         mpv_util::set_flag(state.handle, "pause", true);
+        // 换行用真实的 '\n'，不是 ASS 的 "\N"：mpv 的 show-text 不解析 ASS
+        // 转义，写 "\N" 会原样显示成反斜杠加 N（实测真实换行渲染成两行、
+        // 字面 \N 只有一行）。enhanced-ab-loop 的 show-state 用的也是 '\n'。
         mpv_util::show_osd_message(state.handle,
-                                   "Archive has one entry with a different filename (renamed?).\\N"
+                                   "Archive has one entry with a different filename (renamed?).\n"
                                    "Alt+y to use it, Alt+n to cancel",
                                    kConfirmOsdDuration);
         break;

@@ -324,10 +324,16 @@ function Timeline:render()
 	-- to whatever height the bar currently has, so it also works while the
 	-- timeline is collapsed to the thin progress bar (each layer just gets
 	-- half of those few pixels).
-	local has_split = #state.split_zoom_segments > 0
+	-- Only split the height when **both** kinds are present and the bar is tall
+	-- enough to make two layers readable. With only one kind it keeps the full
+	-- height, and while the timeline is collapsed to the thin progress bar the
+	-- two just overlay each other (they're semi-transparent, so overlaps blend)
+	-- -- two 1px stripes there looked bad and told you nothing.
+	local has_ab, has_split = #state.ab_loop_segments > 0, #state.split_zoom_segments > 0
+	local layered = has_ab and has_split and (fby - fay) >= 8 * state.scale
 	local ab_ay, ab_by = fay, fby
 	local sz_ay, sz_by = fay, fby
-	if has_split then
+	if layered then
 		local mid = fay + (fby - fay) / 2
 		sz_ay, sz_by = fay, mid   -- split segments on top
 		ab_ay, ab_by = mid, fby   -- ab-loop below

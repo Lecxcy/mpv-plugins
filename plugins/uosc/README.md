@@ -89,12 +89,17 @@
 必须用 `'native'`——用 `'string'` + `parse_json` 会静默拿到原字符串而不是
 table（与 enhanced-ab-loop 那次是同一个坑）。
 
-`lua/elements/Timeline.lua`：ab-loop 区间与分屏段**上下分层**绘制——存在分屏段
-时，时间轴高度对半分，分屏段画上层（`config.color.match`，蓝）、ab-loop 画下层
-（`config.color.success`，绿）；没有分屏段时 ab-loop 仍占满原高度，只用
-ab-loop 的场景观感完全不变。两者都用同一套"当前所在区间加亮 + 描边"的处理。
-分层是按当前条高按比例切的，所以时间轴收拢成细进度条时同样成立（各占一半）。
-原生 A/B 楔形标记在**任一种**区间存在时都隐藏。
+`lua/elements/Timeline.lua`：ab-loop 区间与分屏段的绘制分两种情形——
+
+- **两种区间都存在、且条高足够（>= 8*scale）时上下分层**：时间轴高度对半分，
+  分屏段画上层（`config.color.match`，蓝）、ab-loop 画下层
+  （`config.color.success`，绿）。
+- **其余情况各自占满整条高度**：只有一种区间时没有必要让出空间；时间轴收拢
+  成细进度条时两者直接叠色（都是半透明，重叠处自然混合）——那里只有一两个
+  像素高，切成两条 1px 既难看也读不出信息。
+
+两者都用同一套"当前所在区间加亮 + 描边"的处理。原生 A/B 楔形标记在**任一种**
+区间存在时都隐藏。
 
 `uosc.conf`：`progress` 由 `windowed` 改为 `always`，让细进度条在全屏下也显示。
 

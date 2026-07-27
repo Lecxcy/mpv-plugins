@@ -23,6 +23,9 @@ namespace {
 using namespace split_zoom_box;
 
 constexpr double kRefreshIntervalSeconds = 1.0 / 60.0;
+// 没有事件可等时靠 mpv_wait_event 超时把交互刷新拉到 60Hz；有事件时循环跑得
+// 比这快，用它给刷新加个上限，免得高帧率视频的 time-pos 事件流把 OSD 刷爆。
+constexpr auto kInteractiveMinInterval = std::chrono::milliseconds(8);
 constexpr double kMinDragPixels = 4.0;
 constexpr double kBorderWidth = 2.0;
 // 焦点框比框选框粗，否则在窗格边缘很难一眼看出选中的是哪个窗格。
@@ -969,6 +972,26 @@ void pan_finish(PluginState &state) {
     }
 }
 
+// 交互刷新率是"卡不卡"唯一肉眼可见的指标，而它取决于事件循环这一轮跑没跑到
+// （原因见 mpv_open_cplugin 里的说明）。画面上只能看出"卡"、看不出是多少 Hz，
+// 所以这里把实测值打出来：Debug 构建每秒一行，Release 下整段编译期去掉。
+void report_interactive_rate() {
+#ifndef NDEBUG
+    static int count = 0;
+    static std::chrono::steady_clock::time_point window_start{};
+    auto now = std::chrono::steady_clock::now();
+    if (window_start.time_since_epoch().count() == 0) {
+        window_start = now;
+    }
+    ++count;
+    if (now - window_start >= std::chrono::seconds(1)) {
+        MPV_UTIL_DEBUG("交互刷新率 {} Hz\n", count);
+        count = 0;
+        window_start = now;
+    }
+#endif
+}
+
 void drag_begin(PluginState &state) {
     auto pos = read_mouse_pos(state.handle);
     if (!pos) {
@@ -1650,6 +1673,8 @@ extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *handle) {
     // 解码失败自动回退，都会让当前这张图不再适用，必须按新帧类型重建。
     mpv_observe_property(handle, 0, "hwdec-current", MPV_FORMAT_STRING);
 
+    std::chrono::steady_clock::time_point last_interactive{};
+
     while (true) {
         double timeout = (state.dragging || state.panning || state.sizing) ? kRefreshIntervalSeconds : -1.0;
         mpv_event *event = mpv_wait_event(handle, timeout);
@@ -1680,13 +1705,28 @@ extern "C" MPV_EXPORT int mpv_open_cplugin(mpv_handle *handle) {
             }
             break;
         }
-        case MPV_EVENT_NONE:
-            drag_update(state);
-            pan_update(state);
-            sizing_update(state);
-            break;
         default:
             break;
+        }
+
+        // 交互刷新必须放在循环末尾、对每一轮都执行，**不能**只挂在
+        // MPV_EVENT_NONE 分支上。observe 的 time-pos 会随 MPV_EVENT_TICK 每显示
+        // 一帧送来一个事件（player/video.c 里 write_video 结尾发的），而每来一个
+        // 事件都会把 mpv_wait_event 的超时重新计时。60fps 视频的 tick 间隔
+        // 16.7ms 正好等于 kRefreshIntervalSeconds，超时几乎永远轮不到：实测 1080p60
+        // 播放中刷新率只有 1~5 Hz（同一份视频暂停后是 51 Hz），框基本冻住不动
+        // ——这正是"暂停时拖拽顺滑、播放时很卡"的原因。1080p30 tick 间隔 33ms，
+        // 还能挤出 34~36 Hz，所以只在高帧率片源上才明显。挪到这里之后 60fps
+        // 播放中实测 58~62 Hz。
+        if (state.dragging || state.panning || state.sizing) {
+            auto now = std::chrono::steady_clock::now();
+            if (now - last_interactive >= kInteractiveMinInterval) {
+                last_interactive = now;
+                drag_update(state);
+                pan_update(state);
+                sizing_update(state);
+                report_interactive_rate();
+            }
         }
     }
 }

@@ -58,7 +58,7 @@ git submodule update --init --recursive
 
 Windows 上请使用 **MSYS2/MinGW-w64**（`pacman -S mingw-w64-ucrt-x86_64-mpv
 mingw-w64-ucrt-x86_64-cmake`）：`pkg_check_modules` 需要 pkg-config 和 `mpv.pc`，
-而 vcpkg 目前没有官方 mpv port；`scripts/collect-dist.sh` 也需要 bash。
+而 vcpkg 目前没有官方 mpv port；`scripts/steps/collect-dist.sh` 也需要 bash。
 
 ## 构建 C++ 插件
 
@@ -83,7 +83,7 @@ build/plugins/<插件名>/<插件名>.so
 
 mpv 按后缀识别 C 插件，且各平台只认一种：Windows 上产物与加载名都是 `.dll`，
 macOS 和 Linux 都是 `.so`（macOS 不是 `.dylib`）。下文提到 `.so` 的地方在
-Windows 上都对应 `.dll`，`scripts/collect-dist.sh` 会自动按平台处理。
+Windows 上都对应 `.dll`，`scripts/steps/collect-dist.sh` 会自动按平台处理。
 
 ## 运行单元测试
 
@@ -116,14 +116,14 @@ mpv --script=plugins/<本地插件名>/lua/<脚本名>.lua <媒体文件>
 
 ## 收集为可直接使用的 mpv 配置目录
 
-编译完成后，可以用 `scripts/collect-dist.sh` 把 `config/`、已完成 C++ 重写
+编译完成后，可以用 `scripts/steps/collect-dist.sh` 把 `config/`、已完成 C++ 重写
 的插件构建物（`.so`）与已登记的纯 Lua 插件（目前是 uosc、thumbfast）收集到
 `dist/`（默认路径，可传参数覆盖）。**其余尚未 C++ 重写、未登记的纯 Lua
 插件不在收集范围内**，仍按上面"本地测试"里的方式单独加载：
 
 ```sh
-scripts/collect-dist.sh            # 默认 build/ -> dist/
-scripts/collect-dist.sh build dist # 等价的显式写法
+scripts/steps/collect-dist.sh            # 默认 build/ -> dist/
+scripts/steps/collect-dist.sh build dist # 等价的显式写法
 ```
 
 `dist/` 会是一份 mpv 配置目录（`input.conf`、`mpv.conf`、已重写插件的
@@ -133,17 +133,42 @@ scripts/collect-dist.sh build dist # 等价的显式写法
 mpv --config-dir="$(pwd)/dist" <媒体文件>
 ```
 
-或者用 `scripts/install-config.sh` 装进 `~/.config/mpv/`（见下一节）。生成的
+或者用 `scripts/steps/install-config.sh` 装进 `~/.config/mpv/`（见下一节）。生成的
 `mpv.conf` 里插件路径统一用 mpv 的 `~~home/` 元路径写成
 `scripts-append=~~home/...`，指向"当前生效的配置目录"，所以整个 `dist/`
 目录可以随意移动或复制，不依赖生成时的绝对路径。
 
 ## 安装到本机 mpv
 
+macOS 上推荐直接跑流水线，一条命令从编译走到"访达里双击视频就用 mpv 打开"：
+
 ```sh
-cmake --build build            # 1. 编译
-scripts/collect-dist.sh        # 2. 收集到 dist/
-scripts/install-config.sh      # 3. 装进 ~/.config/mpv（-n 先看改动，-y 免确认）
+scripts/deploy-macos.sh                  # 全流程
+scripts/deploy-macos.sh --list           # 看有哪些阶段
+scripts/deploy-macos.sh -n               # 演练，只打印每步要执行的命令
+scripts/deploy-macos.sh --from mpv-app   # 从某个阶段续跑
+scripts/deploy-macos.sh --only build,collect
+```
+
+装了 `ccache` 的话编译阶段会自动用上（`brew install ccache`），`--no-cache`
+可以临时关掉。
+
+`fetch-data` 阶段负责把用 git 管理的**用户数据**拉到 `~/.config/mpv/` 下——
+enhanced-ab-loop 存的循环区间（`loop-segments/`）、split-zoom-box 存的分屏
+布局（`split-layouts/`）。插件能重新编译，做好的分段不能，所以这些值得单独
+用仓库管起来。在 `scripts/steps/data-repos.txt` 里登记「目录名 仓库URL 分支」
+即可，清单为空时整个阶段跳过。
+
+这一步只拉不推，本机新做的数据要自己 commit + push。目录已存在但还不是 git
+仓库时（比如现在），脚本会停下来并打印就地认领的命令，**不会**为了让 clone
+成功去动里面的数据。
+
+各阶段的实现都在 `scripts/steps/` 下，也能单独执行，每个都有自己的 `--help`：
+
+```sh
+cmake --build build                  # 1. 编译
+scripts/steps/collect-dist.sh        # 2. 收集到 dist/
+scripts/steps/install-config.sh      # 3. 装进 ~/.config/mpv（-n 先看改动，-y 免确认）
 ```
 
 `install-config.sh` 只接管 `input.conf`、`mpv.conf` 和
@@ -158,12 +183,12 @@ scripts/install-config.sh      # 3. 装进 ~/.config/mpv（-n 先看改动，-y 
 ### macOS：让视频默认用 mpv 打开
 
 macOS 只允许 `.app` 充当文件的默认打开方式，命令行版 mpv 没法直接设。
-`scripts/make-macos-app.sh` 用 mpv 上游自带的 bundle 骨架
+`scripts/steps/make-macos-app.sh` 用 mpv 上游自带的 bundle 骨架
 （`external/mpv/TOOLS/osxbundle/mpv.app`，需要先初始化 submodule）把
 Homebrew 装的 mpv 包成 `~/Applications/mpv.app`：
 
 ```sh
-scripts/make-macos-app.sh              # 默认 ~/Applications/mpv.app
+scripts/steps/make-macos-app.sh              # 默认 ~/Applications/mpv.app
 ```
 
 之后在访达里"显示简介 → 打开方式 → mpv → 全部更改"即可。这个 bundle 走的是
@@ -174,7 +199,29 @@ mpv 自己的 macOS 集成（`MPVBUNDLE=true`），所以多选打开会合成�
 两个踩过的坑写在脚本注释里：`Contents/MacOS/mpv` 必须是真实文件（软链到
 Homebrew 的话 LaunchServices 会静默拒绝启动），`Info.plist` 的 `LSEnvironment`
 里不能加自定义变量（加了同样会静默启动失败）。`brew upgrade mpv` 之后要重新
-跑一次脚本。
+跑一次脚本——否则 bundle 里那份旧二进制会因为依赖的 dylib 被换掉而在 dyld
+阶段直接崩溃。
+
+### macOS：一个文件一个窗口（多开）
+
+上面那个 bundle 多选打开会合成同一条播放列表。想让每个文件各占一个独立进程，
+用 `scripts/steps/make-mpv-multi-app.sh` 生成 `~/Applications/mpv-multi.app`：
+它是一层很薄的转发壳，收到访达传来的文件后对每个文件单独 `open -n`。
+
+```sh
+scripts/steps/make-mpv-multi-app.sh        # 生成多开 app
+scripts/steps/set-video-handlers.sh        # 把视频格式绑给它
+scripts/steps/set-video-handlers.sh --check # 校验绑定
+```
+
+绑定按 **UTI** 而不是扩展名进行，清单在 `scripts/steps/mpv-multi/video-utis.txt`。
+一个扩展名往往对应好几个 UTI（`.mp4` 有三个、`.ts` 有两个），只绑其中一个就会
+出现"同样是 .ts，这个文件用 mpv 开、那个用别的开"。`--check` 会反查漏网的 UTI。
+
+macOS 26 起改默认打开方式每个 UTI 都要用户点一次确认，所以脚本默认只下发
+还没绑过的，重复执行是静默的；`--mark-bound` 可以把当前清单直接记成已绑
+（用于那些靠 `LSHandlerRank=Owner` 自动生效、不会写进 LaunchServices 偏好
+文件的 UTI）。
 
 ## 开发约定
 

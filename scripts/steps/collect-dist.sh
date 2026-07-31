@@ -8,7 +8,7 @@
 # 重写后再加入 cpp_plugins 列表。
 #
 # 用法：
-#   scripts/collect-dist.sh [build_dir] [dist_dir]
+#   scripts/steps/collect-dist.sh [build_dir] [dist_dir]
 #
 # 默认 build_dir=build，dist_dir=dist（均相对仓库根目录，也可传绝对路径）。
 #
@@ -23,7 +23,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
 
 build_dir="${1:-build}"
 dist_dir="${2:-dist}"
@@ -94,7 +94,7 @@ done
 
 {
     echo ""
-    echo "# 以下由 scripts/collect-dist.sh 自动生成，加载已完成 C++ 重写的插件。"
+    echo "# 以下由 scripts/steps/collect-dist.sh 自动生成，加载已完成 C++ 重写的插件。"
     echo "# ~~home/ 会展开为当前生效的配置目录（见 mpv --config-dir）。"
     for name in "${cpp_plugins[@]}"; do
         echo "scripts-append=~~home/plugins/${name}/${name}.${module_ext}"

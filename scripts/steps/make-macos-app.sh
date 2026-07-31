@@ -4,7 +4,7 @@
 # 打开方式设为 mpv——macOS 只允许 .app 充当文件的默认打开方式。
 #
 # 用法：
-#   scripts/make-macos-app.sh [app_path]
+#   scripts/steps/make-macos-app.sh [app_path]
 #
 # 默认 app_path=~/Applications/mpv.app。可用 MPV_BIN 指定要包装的 mpv 二进制。
 #
@@ -30,7 +30,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "错误：本脚本只适用于 macOS。" >&2

@@ -1,0 +1,69 @@
+# 视频扩展名清单，只被 set-video-handlers.sh --check 使用，不参与绑定本身。
+#
+# 绑定是按 UTI 做的（见 video-utis.txt），但人是按扩展名感知问题的——
+# "为什么这个 .ts 用 mpv 开、那个用 QuickTime 开"。所以校验从扩展名出发：
+#
+#   1. 对每个扩展名跑 duti -x，确认实际 handler 是 mpv-multi；
+#   2. 对每个扩展名跑 duti -e 列出它能解析成的全部 UTI，任何一个不在
+#      video-utis.txt 里就报「漏网」——这正是上面那种时灵时不灵的根因。
+#
+# 系统升级或装了新 app 之后重跑一次 --check，就知道有没有被顶掉或多出新 UTI。
+#
+# 已知例外（--check 会跳过，不必修）：
+#   hdv rv  这两个在本机解析成 dyn.* 动态 UTI，没有稳定 UTI 可绑。格式冷门，
+#           真遇到了用「打开方式」单独指定即可。
+#
+# 关于 ts —— 这是一个有意识做出的取舍，不是疏漏：
+#   .ts 同时是 MPEG-2 Transport Stream 和 TypeScript 源码，而 macOS 只按
+#   扩展名解析 UTI、不看内容。实测（mdls -name kMDItemContentType）一个纯
+#   文本的 TypeScript 文件拿到的也是 public.mpeg-2-transport-stream，所以
+#   两者不可能分开对待：绑了视频，Finder 里双击 .ts 代码就会打开 mpv。
+#
+#   已确认选择"保留给 mpv"。理由是代码基本都在编辑器里打开，很少从 Finder
+#   双击，而 .ts 视频流双击即播的收益更实在。
+#
+#   想反悔的话：把 public.mpeg-2-transport-stream 从 video-utis.txt 里删掉，
+#   重跑 make-mpv-multi-app.sh + set-video-handlers.sh，.ts 就会回到 VS Code
+#   （代价是 .ts 视频也得手动"打开方式"）。
+
+3gp
+3gpp
+3g2
+asf
+avi
+divx
+dv
+f4v
+flv
+m2t
+m2ts
+m4v
+mk3d
+mkv
+mov
+mp4
+mpe
+mpeg
+mpg
+mts
+mtv
+nsv
+nuv
+ogm
+ogv
+qt
+rm
+rmvb
+trp
+ts
+vob
+webm
+wmv
+xvid
+y4m
+yuv
+263
+264
+hevc
+vcd
+svcd

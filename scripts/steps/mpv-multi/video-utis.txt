@@ -1,0 +1,81 @@
+# 要交给 mpv-multi.app 处理的视频 UTI 清单。
+#
+# 这份清单同时驱动两件事：
+#   1. make-mpv-multi-app.sh 用它生成 app 的 CFBundleDocumentTypes；
+#   2. set-video-handlers.sh 用它生成 duti 绑定。
+# 两边共用一份，是为了避免"app 没声明但 duti 绑了"这种半吊子状态——那种
+# 绑定在 Finder 的"打开方式"里不出现，且系统重建 LaunchServices 数据库后
+# 容易被别的 app 顶掉。
+#
+# 为什么不是直接抄 mpv.app 的列表：mpv 只声明了自己那套（含它自造的
+# io.mpv.*），漏掉了同扩展名的系统原生 UTI，缺口就被 QuickTime / Chrome
+# 占了位。下面标了「补」的就是这些漏网的。一个扩展名只要有任何一个 UTI
+# 没绑，那个扩展名就会时灵时不灵。
+#
+# 空行和 # 开头的行会被忽略。改完这里要重跑：
+#   scripts/make-mpv-multi-app.sh && scripts/set-video-handlers.sh
+
+# --- 抽象类型：让清单外的未知视频格式也有兜底 ---
+public.movie
+public.video
+
+# --- MPEG 系 ---
+public.mpeg
+public.mpeg-2-video
+public.mpeg-4
+public.mpeg-2-transport-stream            # 补：.ts 的系统 UTI，原本归 QuickTime
+public.avchd-mpeg-2-transport-stream      # 补：.m2ts 的系统 UTI，原本归 QuickTime
+com.microsoft.ppt.export.mp4              # 补：Office 装出来的 .mp4 别名 UTI
+io.mpv.mts
+
+# --- QuickTime / Apple ---
+com.apple.quicktime-movie
+com.apple.m4v-video
+com.microsoft.ppt.export.mov              # 补：Office 装出来的 .mov 别名 UTI
+
+# --- Matroska / WebM ---
+org.matroska.mkv
+io.mpv.mk3d
+io.mpv.webm
+org.webmproject.webm                      # 补：.webm 的标准 UTI，原本归 Chrome
+
+# --- Microsoft ---
+public.avi
+com.microsoft.advanced-systems-format
+com.microsoft.windows-media-wmv           # 补：.wmv 的系统 UTI
+io.mpv.wmv
+
+# --- Ogg ---
+org.xiph.ogg-video
+org.xiph.ogv                              # 补：.ogv/.ogm 的另一个 UTI，原本归 Chrome
+
+# --- RealMedia ---
+com.real.realmedia
+com.real.realmedia-vbr                    # 补：.rmvb 的 UTI，原本归 QuickTime
+
+# --- Flash ---
+com.adobe.flash.video
+
+# --- 手机 / DV / 其它容器 ---
+public.3gpp
+public.3gpp2
+public.dv-movie
+public.flc-animation
+com.mythtv.nuv
+io.mpv.nsv
+io.mpv.vcd
+io.mpv.vob
+
+# --- 裸码流 / 编码器名（mpv 自造的 UTI）---
+io.mpv.divx
+io.mpv.xvid
+io.mpv.h263
+io.mpv.h264
+io.mpv.hevc
+io.mpv.y4m
+io.mpv.yuv
+
+# --- 故意不绑的 ---
+# public.mpeg-4-audio  .mp4 的音频侧 UTI，同时也是 .m4a 的 UTI，绑了会连
+#                      纯音频文件一起抢走。音频目前留给系统默认。
+# public.image 及各图片 UTI  见 video-extensions.txt 的说明。

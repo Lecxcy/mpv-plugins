@@ -1,0 +1,33 @@
+# 用 git 管理起来的 mpv 用户数据目录。deploy-macos.sh 的 fetch-data 阶段读它。
+#
+# 这里放的是**你自己产出的数据**，不是代码：enhanced-ab-loop 存的循环区间、
+# split-zoom-box 存的分屏布局。文件名是视频的哈希（形如
+# b625708e337c71d3.json），同一个视频在两个目录里各有一份。换机器或重装系统
+# 时，这些是唯一没法重新生成的东西——插件能重新编译，做好的分段不能。
+#
+# 每行三列，空格分隔（第三列可省，默认跟随远端默认分支）：
+#
+#   <目录名，相对 ~/.config/mpv>  <仓库 URL>  [分支]
+#
+# 例：
+#   loop-segments   git@github.com:lecxcy/mpv-loop-segments.git   main
+#   split-layouts   git@github.com:lecxcy/mpv-split-layouts.git   main
+#
+# 目前全是注释，所以 fetch-data 阶段会整个跳过。
+#
+# 拉取行为：
+#   - 目录不存在          -> git clone
+#   - 目录已是 git 仓库    -> git fetch + git pull --ff-only
+#   - 目录存在但不是仓库   -> 报错停下，并打印"把现有数据认领进仓库"的命令
+#
+# 最后一条针对的正是你现在的状态：~/.config/mpv/loop-segments 里已经有做好的
+# 分段，但还没纳入 git。直接 clone 会因为目录非空而失败，而脚本绝不会为了
+# clone 成功去删你的数据——那正是这套机制要保护的东西。
+#
+# 注意这个阶段只**拉**不推。在本机新做的分段要自己提交：
+#
+#   git -C ~/.config/mpv/loop-segments add -A
+#   git -C ~/.config/mpv/loop-segments commit -m "..."
+#   git -C ~/.config/mpv/loop-segments push
+#
+# 不做自动 push 是有意的：自动提交别人没审阅过的数据变更，出错时很难回溯。

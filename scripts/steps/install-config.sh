@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 把 scripts/collect-dist.sh 收集出来的 dist/ 安装进 mpv 的用户配置目录
+# 把 scripts/steps/collect-dist.sh 收集出来的 dist/ 安装进 mpv 的用户配置目录
 # （默认 ~/.config/mpv），让本仓库的插件对日常使用的 mpv 生效。
 #
 # 用法：
-#   scripts/install-config.sh [-n] [-y] [dist_dir] [config_dir]
+#   scripts/steps/install-config.sh [-n] [-y] [dist_dir] [config_dir]
 #
 #   -n  只打印将要发生的改动，不实际写入
 #   -y  跳过确认提示
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
 
 dry_run=0
 assume_yes=0
@@ -35,7 +35,7 @@ while getopts ":ny" opt; do
     case "${opt}" in
         n) dry_run=1 ;;
         y) assume_yes=1 ;;
-        *) echo "用法：scripts/install-config.sh [-n] [-y] [dist_dir] [config_dir]" >&2; exit 1 ;;
+        *) echo "用法：scripts/steps/install-config.sh [-n] [-y] [dist_dir] [config_dir]" >&2; exit 1 ;;
     esac
 done
 shift $((OPTIND - 1))
@@ -46,7 +46,7 @@ config_dir="${2:-${HOME}/.config/mpv}"
 [[ "${config_dir}" != /* ]] && config_dir="${PWD}/${config_dir}"
 
 if [[ ! -f "${dist_dir}/mpv.conf" ]]; then
-    echo "错误：${dist_dir} 里没有 mpv.conf，请先执行 scripts/collect-dist.sh。" >&2
+    echo "错误：${dist_dir} 里没有 mpv.conf，请先执行 scripts/steps/collect-dist.sh。" >&2
     exit 1
 fi
 

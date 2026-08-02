@@ -84,7 +84,28 @@ mkdir -p "$(dirname "${app_path}")"
 cp "${launcher}" "${app_path}/Contents/Resources/launch-mpv.sh"
 chmod +x "${app_path}/Contents/Resources/launch-mpv.sh"
 
+# 骨架里 UTImportedTypeDeclarations 的每一条都写着 UTTypeIconFile=document.icns。
+# 只搬声明不搬图标文件的话，IconServices 会按声明去找一个不存在的文件，然后
+# 返回一张空图——访达里这些格式的图标会整个消失，连点击热区都没有。
+#
+# 踩过：avi/mkv/flv/m4v/rm 全变空白，而 mp4/mov/webm/wmv 正常。分界线正是
+# "这个 UTI 在不在导入列表里"。排查时先怀疑了盘、缓存、处理程序，最后才发现
+# 是自己少拷了一个文件。
+#
+# 拷不到就在下面把 UTTypeIconFile 键删掉，绝不留悬空引用。
+doc_icon=""
+if [[ -n "${skeleton_plist}" ]]; then
+    candidate="$(dirname "${skeleton_plist}")/Resources/document.icns"
+    if [[ -f "${candidate}" ]]; then
+        cp "${candidate}" "${app_path}/Contents/Resources/document.icns"
+        doc_icon="document.icns"
+    else
+        echo "提示：骨架里没有 document.icns，导入声明将不带图标引用。" >&2
+    fi
+fi
+
 BUNDLE_ID="${bundle_id}" UTI_LIST="${uti_list}" SKELETON="${skeleton_plist}" \
+DOC_ICON="${doc_icon}" \
 APP_PLIST="${app_path}/Contents/Info.plist" /usr/bin/python3 - <<'PY'
 import os
 import plistlib
@@ -93,6 +114,8 @@ app_plist = os.environ["APP_PLIST"]
 uti_list = os.environ["UTI_LIST"]
 skeleton = os.environ["SKELETON"]
 bundle_id = os.environ["BUNDLE_ID"]
+# 外面拷成功才有值。空字符串表示 bundle 里没有可引用的文档图标。
+doc_icon = os.environ.get("DOC_ICON", "")
 
 # 清单里允许行尾写 # 注释，先剥掉再取值。
 utis = []
@@ -115,13 +138,18 @@ info["LSUIElement"] = True
 
 # 整段替换掉 osacompile 默认那个 ["*"] / "****" 的通配声明。Owner 这个 rank
 # 表示"我就是这类文件的主人"，优先级高于系统里其它只声明 Default 的 app。
-info["CFBundleDocumentTypes"] = [{
+doc_type = {
     "CFBundleTypeName": "Video File",
     "CFBundleTypeRole": "Viewer",
     "LSHandlerRank": "Owner",
     "LSTypeIsPackage": False,
     "LSItemContentTypes": utis,
-}]
+}
+# 我们是这些类型的 Owner，访达就拿我们声明的图标去画文件。不给的话只能靠
+# 系统按 UTI 现场合成，给了更稳。
+if doc_icon:
+    doc_type["CFBundleTypeIconFile"] = doc_icon
+info["CFBundleDocumentTypes"] = [doc_type]
 
 # 只搬清单里真正用到的那几条，不把 mpv 的字幕/音频 UTI 也一起声明进来。
 imported = []
@@ -129,14 +157,24 @@ if skeleton:
     with open(skeleton, "rb") as fh:
         skel = plistlib.load(fh)
     wanted = set(utis)
-    imported = [d for d in skel.get("UTImportedTypeDeclarations", [])
-                if d.get("UTTypeIdentifier") in wanted]
+    for d in skel.get("UTImportedTypeDeclarations", []):
+        if d.get("UTTypeIdentifier") not in wanted:
+            continue
+        d = dict(d)
+        # 悬空的图标引用比没有引用糟得多：前者让访达画出一张空图，后者会
+        # 老老实实回退到系统的通用图标。
+        if doc_icon:
+            d["UTTypeIconFile"] = doc_icon
+        else:
+            d.pop("UTTypeIconFile", None)
+        imported.append(d)
 info["UTImportedTypeDeclarations"] = imported
 
 with open(app_plist, "wb") as fh:
     plistlib.dump(info, fh)
 
-print(f"  声明了 {len(utis)} 个 UTI，搬运了 {len(imported)} 条 UTI 定义")
+icon_note = f"图标 {doc_icon}" if doc_icon else "无图标引用"
+print(f"  声明了 {len(utis)} 个 UTI，搬运了 {len(imported)} 条 UTI 定义（{icon_note}）")
 PY
 
 # 必须在所有文件都改完之后再签，签名会把 Info.plist 和 Resources 一起封住。

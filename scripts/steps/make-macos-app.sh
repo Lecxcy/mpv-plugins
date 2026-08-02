@@ -86,6 +86,28 @@ codesign --force -s - "${app_path}" >/dev/null
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 [[ -x "${lsregister}" ]] && "${lsregister}" -f "${app_path}"
 
+# 仓库里的 mpv 骨架自己也是个 bundle id 为 io.mpv 的 .app，LaunchServices 会
+# 把它一起扫进数据库。git worktree 每多一个，就多一份。实测过一台机器上同时
+# 注册了四份 io.mpv：
+#   ~/Applications/mpv.app                                    ← 真的
+#   <repo>/external/mpv/TOOLS/osxbundle/mpv.app               ← 骨架
+#   <repo>/.claude/worktrees/*/external/mpv/.../mpv.app       ← 每个 worktree 一份
+#
+# 而 mpv-multi 的 launch-mpv.sh 第一优先级就是 open -n -b io.mpv。同一个 id
+# 有多个注册项时，系统挑哪个是不确定的——挑中骨架就等于启动一个
+# Contents/MacOS 里没有可执行文件的空壳，症状是双击视频毫无反应，而且时灵
+# 时不灵，极难查。
+#
+# 所以每次生成真正的 mpv.app 之后，顺手把仓库内的所有骨架副本注销掉。
+# 注销不改动文件本身，只是把它们从 LaunchServices 数据库里摘掉。
+if [[ -x "${lsregister}" ]]; then
+    while IFS= read -r skeleton_app; do
+        [[ -n "${skeleton_app}" ]] || continue
+        echo "  注销仓库内的 mpv 骨架：${skeleton_app#"${repo_root}/"}"
+        "${lsregister}" -u "${skeleton_app}" >/dev/null 2>&1 || true
+    done < <(find "${repo_root}" -type d -name "mpv.app" -path "*/osxbundle/*" 2>/dev/null)
+fi
+
 echo "完成：${app_path}"
 echo ""
 echo "接下来："
